@@ -1,0 +1,2 @@
+#epg链接，一行一个
+https://raw.githubusercontent.com/litiande03/epg/refs/heads/master/pl.xml.gz
