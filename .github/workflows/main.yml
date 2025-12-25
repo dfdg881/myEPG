@@ -2,9 +2,9 @@ name: 'Update schedule'
 
 on:
   schedule:
-    - cron: '0 4,16 * * *'
+    - cron: '0 22,10 * * *'
   workflow_dispatch:
-    branches:
+    分支:
       - master
   push:
     branches:
