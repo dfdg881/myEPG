@@ -34,6 +34,7 @@ jobs:
           pipenv --python 3.13 && pipenv install --deploy
       - name: Update EPG
         run: pipenv run epg
+
       - name: Commit and push if changed
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
