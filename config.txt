@@ -2,3 +2,4 @@
 https://epg.112114.xyz/pp.xml
 https://e.136605.xyz/1.xml
 https://raw.githubusercontent.com/litiande03/epg/refs/heads/master/pl.xml.gz
+https://liliu.serv00.net/epg/download.php?type=xml
