@@ -75,8 +75,11 @@ def parse_epg(epg_content):
         channel_elem = ET.SubElement(
             root, 'programme', attrib={"channel": channel_id, "start": channel_start.strftime("%Y%m%d%H%M%S %z"), "stop": channel_stop.strftime("%Y%m%d%H%M%S %z")})
         for title in programme.findall('title'):
+            if title.text is None:
+                channel_title = "精彩节目"
+            else:
+                channel_title = title.text.strip()
             langattr = title.get('lang')
-            channel_title = title.text.strip()
             if langattr == 'zh' or langattr is None:
                 channel_title = transform2_zh_hans(channel_title)
             channel_elem_t = ET.SubElement(
