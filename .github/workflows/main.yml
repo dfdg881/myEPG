@@ -4,7 +4,7 @@ on:
   schedule:
     - cron: '0 20,16,9 * * *'
   workflow_dispatch:
-    branches:
+    分支:
       - master
   push:
     branches:
@@ -38,27 +38,8 @@ jobs:
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          if [[ -f "output/epg.xml" ]]; then
-            git add -f "output/epg.xml"
-          fi
-          if [[ -f "output/epg.gz" ]]; then
-            git add -f "output/epg.gz"
-          fi
+          git add .
           if ! git diff --staged --quiet; then
-            git reset --soft $(git rev-list --max-parents=0 HEAD)
-            git commit --amend -m "Github Action Auto Updated"
+            git commit -m "Github Action Auto Updated"
             git push --force
           fi
-      
-      - name: Mirror the Github organization repos to Gitee.
-        uses: Yikun/hub-mirror-action@master
-        with:
-          src: 'github/mytv-android'    			
-          dst: 'gitee/mytv-android'   
-          dst_key: ${{ secrets.GITEE_PRIVATE_KEY }}  
-          dst_token:  ${{ secrets.GITEE_TOKEN }}  
-          force_update: true
-          static_list: "myEPG"
-          account_type: org   		
-          debug: true
-
