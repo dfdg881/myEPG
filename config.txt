@@ -1,4 +1,3 @@
 #epg链接，一行一个
 https://liliu.serv00.net/epg/download.php?type=xml
 https://epg.136605.xyz/1day.xml
-https://github.com/litiande03/epg/raw/refs/heads/master/pl.xml.gz
