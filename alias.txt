@@ -1,0 +1,4 @@
+CCTV1,央视一套,CCTV-1
+CCTV2,央视二套,CCTV-2
+湖南卫视,芒果台
+CCTV6,央视六套,CCTV-6

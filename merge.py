@@ -146,16 +146,46 @@ def get_urls():
     return urls
 
 
+def load_whitelist():
+    whitelist = []
+    alias_map = {}
+    if os.path.exists('demo.txt'):
+        with open('demo.txt', 'r', encoding='utf-8') as f:
+            for line in f:
+                name = line.strip()
+                if name:
+                    standard_name = transform2_zh_hans(name)
+                    if standard_name not in whitelist:
+                        whitelist.append(standard_name)
+                    alias_map[standard_name] = standard_name
+
+    if os.path.exists('alias.txt'):
+        with open('alias.txt', 'r', encoding='utf-8') as f:
+            for line in f:
+                parts = [p.strip() for p in line.split(',')]
+                if parts:
+                    standard_name = transform2_zh_hans(parts[0])
+                    if standard_name in whitelist:
+                        for alias in parts:
+                            alias_map[transform2_zh_hans(alias)] = standard_name
+    return whitelist, alias_map
+
+
 async def main():
     urls = get_urls()
+    whitelist, alias_map = load_whitelist()
+    if not whitelist:
+        print("Warning: demo.txt is empty or missing. No channels will be matched.")
+
     tasks = [fetch_epg(url) for url in urls]
     print("Fetching EPG data...")
     epg_contents = await tqdm_asyncio.gather(*tasks, desc="Fetching URLs")
-    all_channels_map = {}
+
     all_channel_id = set()
     all_channel_names = defaultdict(list)
     all_programmes = defaultdict(list)
     print("Finished.")
+
     i = 0
     for epg_content in epg_contents:
         i += 1
@@ -165,37 +195,43 @@ async def main():
         print("Parsing EPG data...")
         channels, programmes = parse_epg(epg_content)
         print("Finished.")
+
         with tqdm(total=len(channels), desc="Merging EPG", unit="file") as pbar:
             for channel_id, display_names in channels.items():
                 if len(programmes[channel_id]) == 0:
+                    pbar.update(1)
                     continue
-                is_in_map = channel_id in all_channels_map
-                map_id = channel_id
-                for display_name_node in display_names:
-                    display_name = display_name_node[0]
-                    if is_in_map:
-                        break
-                    is_in_map = is_in_map or (display_name  in all_channels_map)
-                    map_id = display_name
-                map_id = all_channels_map.get(map_id, channel_id)
-                if not is_in_map:
-                    all_channel_id.add(channel_id)
-                    all_channel_names[channel_id] = display_names
-                    all_programmes[display_name] = programmes[channel_id]
-                    all_channels_map[channel_id] = channel_id
+
+                # Match channel by ID or any display name against alias_map
+                standard_name = None
+                if channel_id in alias_map:
+                    standard_name = alias_map[channel_id]
+                else:
                     for display_name_node in display_names:
                         display_name = display_name_node[0]
-                        all_channels_map[display_name] = channel_id
-                elif len(all_programmes[map_id]) < len(programmes[channel_id]):
-                    all_programmes[map_id] = programmes[channel_id]
-                    for display_name_node in display_names:
-                        display_name = display_name_node[0]
-                        if display_name not in all_channels_map:
-                            all_channel_names[map_id].append(display_name_node)
-                            all_channels_map[display_name] = map_id
+                        if display_name in alias_map:
+                            standard_name = alias_map[display_name]
+                            break
+
+                if standard_name and standard_name in whitelist:
+                    if standard_name not in all_programmes or len(programmes[channel_id]) > len(all_programmes[standard_name]):
+                        if standard_name not in all_programmes:
+                            print(f"  Matched channel: {standard_name} (from source: {channel_id})")
+                        all_programmes[standard_name] = programmes[channel_id]
+                        all_channel_id.add(standard_name)
+                        all_channel_names[standard_name] = [[standard_name, 'zh']]
+
                 pbar.update(1)  # 更新进度条
+
     print("Writing to XML...")
-    write_to_xml(all_channel_id, all_channel_names,
+    # Sort all_channel_id based on demo.txt order
+    sorted_channel_ids = [name for name in whitelist if name in all_channel_id]
+    # Add any matched channels that might not be in the ordered whitelist (though with current logic it shouldn't happen)
+    for cid in all_channel_id:
+        if cid not in sorted_channel_ids:
+            sorted_channel_ids.append(cid)
+
+    write_to_xml(sorted_channel_ids, all_channel_names,
                 all_programmes, 'output/epg.xml')
     compress_to_gz('output/epg.xml', 'output/epg.gz')
 
