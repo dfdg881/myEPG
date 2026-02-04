@@ -1,4 +1,1 @@
-#epg链接，一行一个
-https://raw.githubusercontent.com/fanmingming/live/main/e.xml
-https://raw.githubusercontent.com/kuke31/xmlgz/main/e.xml
-http://epg.51zmt.top:8000/e.xml.gz
+http://localhost:8000/mock_epg.xml

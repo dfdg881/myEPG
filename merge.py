@@ -223,31 +223,38 @@ async def main():
                     pbar.update(1)
                     continue
 
-                matched_standard_names = set()
-                # 1. Match by alias_map (demo.txt)
+                # 1. Original Logic for standard channels
+                standard_name = None
                 if channel_id in alias_map:
-                    matched_standard_names.add(alias_map[channel_id])
-                for display_name_node in display_names:
-                    display_name = display_name_node[0]
-                    if display_name in alias_map:
-                        matched_standard_names.add(alias_map[display_name])
+                    standard_name = alias_map[channel_id]
+                else:
+                    for display_name_node in display_names:
+                        display_name = display_name_node[0]
+                        if display_name in alias_map:
+                            standard_name = alias_map[display_name]
+                            break
+
+                if standard_name and standard_name in whitelist:
+                    if standard_name not in all_programmes or len(programmes[channel_id]) > len(all_programmes[standard_name]):
+                        all_programmes[standard_name] = programmes[channel_id]
+                        all_channel_id.add(standard_name)
+                        all_channel_names[standard_name] = [[standard_name, 'zh']]
 
                 # 2. Match by 4k_map (4k.txt)
                 names_to_check = [channel_id] + [dn[0] for dn in display_names]
+                matched_4k_names = set()
                 for name_to_check in names_to_check:
                     base_name = get_base_name(name_to_check)
                     if base_name in k4_map:
                         for original_4k_name in k4_map[base_name]:
-                            matched_standard_names.add(original_4k_name)
+                            matched_4k_names.add(original_4k_name)
 
-                for standard_name in matched_standard_names:
-                    if standard_name in whitelist or standard_name in k4_list:
-                        if standard_name not in all_programmes or len(programmes[channel_id]) > len(all_programmes[standard_name]):
-                            if standard_name not in all_programmes:
-                                print(f"  Matched channel: {standard_name} (from source: {channel_id})")
-                            all_programmes[standard_name] = [copy.deepcopy(p) for p in programmes[channel_id]]
-                            all_channel_id.add(standard_name)
-                            all_channel_names[standard_name] = [[standard_name, 'zh']]
+                for k4_name in matched_4k_names:
+                    if k4_name in k4_list:
+                        if k4_name not in all_programmes or len(programmes[channel_id]) > len(all_programmes[k4_name]):
+                            all_programmes[k4_name] = [copy.deepcopy(p) for p in programmes[channel_id]]
+                            all_channel_id.add(k4_name)
+                            all_channel_names[k4_name] = [[k4_name, 'zh']]
 
                 pbar.update(1)  # 更新进度条
 
