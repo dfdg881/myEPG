@@ -1,5 +1,9 @@
-#epg链接，一行一个
-https://raw.githubusercontent.com/fanmingming/live/main/e.xml
-https://raw.githubusercontent.com/kuke31/xmlgz/main/e.xml
-https://raw.githubusercontent.com/litiande03/epg/refs/heads/master/pl.xml.gz
-http://epg.51zmt.top:8000/e.xml.gz
+https://epg.pw/xmltv/feed/pccw_standard.xml.gz
+https://epg.pw/xmltv/feed/pccw_full.xml.gz
+https://epg.112114.xyz/pp.xml
+https://epg.pw/xmltv/feed/pccw_now_sports.xml.gz
+https://epg.pw/xmltv/feed/pccw_now_movie.xml.gz
+http://epg.51zmt.top:8000/cc.xml
+http://epg.51zmt.top:8000/df.xml
+http://epg.51zmt.top:8000/gat.xml
+https://live.fanmingming.com/e.xml
