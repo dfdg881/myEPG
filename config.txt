@@ -1,5 +1,4 @@
 #epg链接，一行一个
 https://liliu.serv00.net/epg/download.php?type=xml
 https://raw.githubusercontent.com/kuke31/xmlgz/main/e.xml
-https://raw.githubusercontent.com/litiande03/epg/refs/heads/master/pl.xml.gz
 http://epg.51zmt.top:8000/e.xml.gz
