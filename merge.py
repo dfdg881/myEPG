@@ -125,16 +125,21 @@ def write_to_xml(channels_id, channels_names, programmes, filename):
     current_time = datetime.now(TZ_UTC_PLUS_8).strftime("%Y%m%d%H%M%S %z")
     root = ET.Element('tv', attrib={'date': current_time})
     for channel_id in channels_id:
+        if channel_id is None:
+            continue
         channel_elem = ET.SubElement(
             root, 'channel', attrib={"id": channel_id})
-        for display_name_node in channels_names[channel_id]:
+        for display_name_node in channels_names.get(channel_id, []):
             display_name = display_name_node[0]
+            if display_name is None:
+                continue
             langattr = display_name_node[1]
             display_name_elem = ET.SubElement(
                 channel_elem, 'display-name', attrib={"lang": langattr})
             display_name_elem.text = display_name
-        for prog in programmes[channel_id]:
-            prog.set('channel', channel_id)  # 设置 programme 的 channel 属性
+        for prog in programmes.get(channel_id, []):
+            if channel_id:
+                prog.set('channel', channel_id)
             root.append(prog)
 
     # Beautify the XML output
@@ -242,12 +247,12 @@ async def main():
                 for display_name_node in display_names:
                     display_name = display_name_node[0]
                     
-                    if display_name in demo_channels_set:
+                    if display_name and display_name in demo_channels_set:
                         channel_in_demo = True
                         matched_demo_name = display_name
                         break
                     
-                    if display_name in alias_to_main:
+                    if display_name and display_name in alias_to_main:
                         main_name = alias_to_main[display_name]
                         if main_name in demo_channels_set:
                             channel_in_demo = True
@@ -270,11 +275,19 @@ async def main():
                     if channel_in_demo:
                         break
                 
+                if not channel_in_demo or not matched_demo_name:
+                    pbar.update(1)
+                    continue
+                
                 final_channel_id = matched_demo_name
                 final_display_names = display_names.copy()
                 
-                if matched_4k_name and matched_4k_name not in [d[0] for d in final_display_names]:
+                if matched_4k_name and matched_4k_name not in [d[0] for d in final_display_names if d[0]]:
                     final_display_names.insert(0, [matched_4k_name, 'zh'])
+                
+                if not final_channel_id:
+                    pbar.update(1)
+                    continue
                 
                 is_in_map = channel_id in all_channels_map
                 map_id = channel_id
@@ -292,23 +305,27 @@ async def main():
                     map_id = all_channels_map[map_id]
                 
                 if not is_in_map:
-                    all_channel_id.add(final_channel_id)
-                    all_channel_names[final_channel_id] = final_display_names
-                    all_programmes[final_channel_id] = programmes[channel_id]
-                    all_channels_map[channel_id] = channel_id
-                    for display_name_node in final_display_names:
-                        display_name = display_name_node[0]
-                        all_channels_map[display_name] = channel_id
+                    if final_channel_id:
+                        all_channel_id.add(final_channel_id)
+                        all_channel_names[final_channel_id] = final_display_names
+                        all_programmes[final_channel_id] = programmes[channel_id]
+                        all_channels_map[channel_id] = channel_id
+                        for display_name_node in final_display_names:
+                            display_name = display_name_node[0]
+                            if display_name:
+                                all_channels_map[display_name] = channel_id
                 elif len(all_programmes.get(map_id, [])) < len(programmes[channel_id]):
                     all_programmes[map_id] = programmes[channel_id]
                     for display_name_node in final_display_names:
                         display_name = display_name_node[0]
-                        if display_name not in all_channels_map:
+                        if display_name and display_name not in all_channels_map:
                             all_channel_names[map_id].append(display_name_node)
                             all_channels_map[display_name] = map_id
                 pbar.update(1)
     
     print("Writing to XML...")
+    all_channel_id = {k for k in all_channel_id if k is not None}
+    all_programmes = {k: v for k, v in all_programmes.items() if k is not None}
     write_to_xml(all_channel_id, all_channel_names,
                 all_programmes, 'output/epg.xml')
     compress_to_gz('output/epg.xml', 'output/epg.gz')
