@@ -11,6 +11,7 @@ import re
 from opencc import OpenCC
 import os
 from tqdm import tqdm  # 引入 tqdm 的同步支持
+import difflib
 
 TZ_UTC_PLUS_8 = timezone(timedelta(hours=8))
 
@@ -19,6 +20,74 @@ def transform2_zh_hans(string):
     cc = OpenCC("t2s")
     new_str = cc.convert(string)
     return new_str
+
+
+def load_demo_channels():
+    """加载demo.txt中的频道名称"""
+    demo_channels = set()
+    if os.path.exists('demo.txt'):
+        with open('demo.txt', 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    demo_channels.add(line)
+    return demo_channels
+
+
+def load_alias_map():
+    """加载alias.txt中的别名映射"""
+    alias_map = {}
+    if os.path.exists('alias.txt'):
+        with open('alias.txt', 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    parts = line.split(',')
+                    if len(parts) >= 2:
+                        main_name = parts[0].strip()
+                        for alias in parts[1:]:
+                            alias_map[alias.strip()] = main_name
+    return alias_map
+
+
+def load_4k_channels():
+    """加载4k.txt中的4K频道名称"""
+    k4_channels = set()
+    if os.path.exists('4k.txt'):
+        with open('4k.txt', 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    k4_channels.add(line)
+    return k4_channels
+
+
+def fuzzy_match_channel_name(channel_name, target_channels, threshold=0.8):
+    """模糊匹配频道名称"""
+    # 首先尝试精确匹配
+    if channel_name in target_channels:
+        return channel_name
+    
+    # 尝试别名映射
+    alias_map = load_alias_map()
+    if channel_name in alias_map:
+        mapped_name = alias_map[channel_name]
+        if mapped_name in target_channels:
+            return mapped_name
+    
+    # 尝试模糊匹配
+    matches = difflib.get_close_matches(channel_name, target_channels, n=1, cutoff=threshold)
+    if matches:
+        return matches[0]
+    
+    return None
+
+
+def normalize_channel_name(channel_name):
+    """标准化频道名称，用于匹配"""
+    # 移除常见的标识符
+    normalized = channel_name.replace("4K", "").replace("4k", "").strip()
+    return normalized
 
 
 async def fetch_epg(url):
@@ -161,6 +230,11 @@ def get_urls():
 
 
 async def main():
+    # 加载频道名称配置
+    demo_channels = load_demo_channels()
+    alias_map = load_alias_map()
+    k4_channels = load_4k_channels()
+    
     urls = get_urls()
     tasks = [fetch_epg(url) for url in urls]
     print("Fetching EPG data...")
@@ -192,21 +266,104 @@ async def main():
                     is_in_map = is_in_map or (display_name  in all_channels_map)
                     map_id = display_name
                 map_id = all_channels_map.get(map_id, channel_id)
-                if not is_in_map:
-                    all_channel_id.add(channel_id)
-                    all_channel_names[channel_id] = display_names
-                    all_programmes[display_name] = programmes[channel_id]
-                    all_channels_map[channel_id] = channel_id
+                
+                # 尝试匹配demo.txt中的频道名称
+                matched_demo_channel = None
+                for display_name_node in display_names:
+                    display_name = display_name_node[0]
+                    # 尝试精确匹配
+                    if display_name in demo_channels:
+                        matched_demo_channel = display_name
+                        break
+                    # 尝试别名映射
+                    if display_name in alias_map:
+                        mapped_name = alias_map[display_name]
+                        if mapped_name in demo_channels:
+                            matched_demo_channel = mapped_name
+                            break
+                    # 尝试模糊匹配
+                    if matched_demo_channel is None:
+                        matched_demo_channel = fuzzy_match_channel_name(display_name, demo_channels)
+                        if matched_demo_channel:
+                            break
+                
+                # 如果匹配到demo频道，使用匹配到的名称作为映射ID
+                if matched_demo_channel:
+                    map_id = all_channels_map.get(matched_demo_channel, channel_id)
+                    if matched_demo_channel not in all_channels_map:
+                        # 将匹配到的频道名也加入映射
+                        all_channels_map[matched_demo_channel] = channel_id
+                        all_channel_id.add(channel_id)
+                        all_channel_names[channel_id] = display_names
+                        all_programmes[channel_id] = programmes[channel_id]
+                        # 添加所有显示名称到映射
+                        for name_node in display_names:
+                            name = name_node[0]
+                            if name not in all_channels_map:
+                                all_channels_map[name] = channel_id
+                    elif len(all_programmes[map_id]) < len(programmes[channel_id]):
+                        all_programmes[map_id] = programmes[channel_id]
+                        for display_name_node in display_names:
+                            display_name = display_name_node[0]
+                            if display_name not in all_channels_map:
+                                all_channel_names[map_id].append(display_name_node)
+                                all_channels_map[display_name] = map_id
+                else:
+                    # 如果没有匹配到demo频道，尝试匹配4k频道
+                    matched_4k_channel = None
                     for display_name_node in display_names:
                         display_name = display_name_node[0]
-                        all_channels_map[display_name] = channel_id
-                elif len(all_programmes[map_id]) < len(programmes[channel_id]):
-                    all_programmes[map_id] = programmes[channel_id]
-                    for display_name_node in display_names:
-                        display_name = display_name_node[0]
-                        if display_name not in all_channels_map:
-                            all_channel_names[map_id].append(display_name_node)
-                            all_channels_map[display_name] = map_id
+                        # 尝试精确匹配
+                        if display_name in k4_channels:
+                            matched_4k_channel = display_name
+                            break
+                        # 尝试别名映射
+                        if display_name in alias_map:
+                            mapped_name = alias_map[display_name]
+                            if mapped_name in k4_channels:
+                                matched_4k_channel = mapped_name
+                                break
+                        # 尝试模糊匹配
+                        if matched_4k_channel is None:
+                            matched_4k_channel = fuzzy_match_channel_name(display_name, k4_channels)
+                            if matched_4k_channel:
+                                break
+                    
+                    if matched_4k_channel:
+                        map_id = all_channels_map.get(matched_4k_channel, channel_id)
+                        if matched_4k_channel not in all_channels_map:
+                            all_channels_map[matched_4k_channel] = channel_id
+                            all_channel_id.add(channel_id)
+                            all_channel_names[channel_id] = display_names
+                            all_programmes[channel_id] = programmes[channel_id]
+                            for name_node in display_names:
+                                name = name_node[0]
+                                if name not in all_channels_map:
+                                    all_channels_map[name] = channel_id
+                        elif len(all_programmes[map_id]) < len(programmes[channel_id]):
+                            all_programmes[map_id] = programmes[channel_id]
+                            for display_name_node in display_names:
+                                display_name = display_name_node[0]
+                                if display_name not in all_channels_map:
+                                    all_channel_names[map_id].append(display_name_node)
+                                    all_channels_map[display_name] = map_id
+                    else:
+                        # 没有匹配到demo或4k频道，按原来的逻辑处理
+                        if not is_in_map:
+                            all_channel_id.add(channel_id)
+                            all_channel_names[channel_id] = display_names
+                            all_programmes[display_name] = programmes[channel_id]
+                            all_channels_map[channel_id] = channel_id
+                            for display_name_node in display_names:
+                                display_name = display_name_node[0]
+                                all_channels_map[display_name] = channel_id
+                        elif len(all_programmes[map_id]) < len(programmes[channel_id]):
+                            all_programmes[map_id] = programmes[channel_id]
+                            for display_name_node in display_names:
+                                display_name = display_name_node[0]
+                                if display_name not in all_channels_map:
+                                    all_channel_names[map_id].append(display_name_node)
+                                    all_channels_map[display_name] = map_id
                 pbar.update(1)  # 更新进度条
     print("Writing to XML...")
     write_to_xml(all_channel_id, all_channel_names,
