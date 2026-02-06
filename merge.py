@@ -311,6 +311,7 @@ async def main():
                 is_in_map = False
                 map_id = channel_id
                 
+                # Look for an existing mapping using processed names
                 for display_name_node in processed_display_names:
                     display_name = display_name_node[0]
                     if display_name in all_channels_map:
@@ -318,7 +319,6 @@ async def main():
                         map_id = all_channels_map[display_name]
                         break
                 
-                # Special handling for 4K channels to preserve both 4K and normalized versions
                 if not is_in_map:
                     # Add the channel to our collection
                     all_channel_id.add(channel_id)
@@ -331,31 +331,16 @@ async def main():
                         if display_name not in all_channels_map:
                             all_channels_map[display_name] = channel_id
                 else:
-                    # Special handling for 4K channels to preserve both versions
-                    is_current_4k = any(name_node[0] in k4_channels for name_node in display_names)
-                    existing_is_4k = any(all_channels_map.get(name_node[0]) == map_id for name_node in all_channel_names.get(map_id, []) if name_node[0] in k4_channels)
-                    
-                    # If current is 4K and existing is not, or vice versa, we want to preserve both
-                    if is_current_4k != existing_is_4k:
-                        # Create a new entry to preserve both 4K and non-4K names
-                        all_channel_id.add(channel_id)
-                        all_channel_names[channel_id] = original_display_names
-                        all_programmes[channel_id] = programmes[channel_id]
-                        all_channels_map[channel_id] = channel_id
-                        for display_name_node in processed_display_names:
-                            display_name = display_name_node[0]
-                            if display_name not in all_channels_map:
-                                all_channels_map[display_name] = channel_id
-                    else:
-                        # If both are 4K or both are non-4K, use standard merging logic
-                        if map_id in all_programmes and len(all_programmes[map_id]) < len(programmes[channel_id]):
-                            all_programmes[map_id] = programmes[channel_id]
-                        # Add new display names to existing channel if they don't already exist
-                        for display_name_node in original_display_names:
-                            display_name = display_name_node[0]
-                            if display_name not in all_channels_map:
-                                all_channel_names[map_id].append(display_name_node)
-                                all_channels_map[display_name] = map_id
+                    # Update programmes if new source has more data
+                    if map_id in all_programmes and len(all_programmes[map_id]) < len(programmes[channel_id]):
+                        all_programmes[map_id] = programmes[channel_id]
+                    # Add new display names to existing channel if they don't already exist
+                    # Preserve original display names to keep 4K versions
+                    for display_name_node in original_display_names:
+                        display_name = display_name_node[0]
+                        if display_name not in all_channels_map:
+                            all_channel_names[map_id].append(display_name_node)
+                            all_channels_map[display_name] = map_id
                 pbar.update(1)  # 更新进度条
     print("Writing to XML...")
     write_to_xml(all_channel_id, all_channel_names,
