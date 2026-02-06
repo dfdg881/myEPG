@@ -1,4 +1,3 @@
 #epg链接，一行一个
-http://epg.cdn.loc.cc/xml
 https://raw.githubusercontent.com/kuke31/xmlgz/main/e.xml.gz
 http://epg.51zmt.top:8000/e.xml
