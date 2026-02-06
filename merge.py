@@ -160,15 +160,66 @@ def get_urls():
     return urls
 
 
+def get_demo_channels():
+    """读取demo.txt中的目标频道列表"""
+    channels = []
+    with open('demo.txt', 'r', encoding='utf-8') as file:
+        for line in file:
+            line = line.strip()
+            if line:
+                channels.append(line)
+    return channels
+
+
+def get_alias_map():
+    """读取alias.txt建立别名映射字典"""
+    alias_map = {}
+    alias_to_main = {}
+    with open('alias.txt', 'r', encoding='utf-8') as file:
+        for line in file:
+            parts = line.strip().split(',')
+            if parts:
+                main_name = parts[0].strip()
+                alias_map[main_name] = [p.strip() for p in parts[1:] if p.strip()]
+                for alias in alias_map[main_name]:
+                    alias_to_main[alias] = main_name
+    return alias_map, alias_to_main
+
+
+def get_4k_channels():
+    """读取4K.txt中的4K频道列表"""
+    channels = []
+    with open('4K.txt', 'r', encoding='utf-8') as file:
+        for line in file:
+            line = line.strip()
+            if line:
+                channels.append(line)
+    return channels
+
+
 async def main():
     urls = get_urls()
     tasks = [fetch_epg(url) for url in urls]
     print("Fetching EPG data...")
     epg_contents = await tqdm_asyncio.gather(*tasks, desc="Fetching URLs")
+    
+    demo_channels = get_demo_channels()
+    alias_map, alias_to_main = get_alias_map()
+    k4_channels = get_4k_channels()
+    
     all_channels_map = {}
     all_channel_id = set()
     all_channel_names = defaultdict(list)
     all_programmes = defaultdict(list)
+    
+    demo_channels_set = set(demo_channels)
+    
+    for k4_channel in k4_channels:
+        if k4_channel.endswith('4K'):
+            base_name = k4_channel[:-2].strip()
+            if base_name not in demo_channels_set:
+                demo_channels_set.add(base_name)
+    
     print("Finished.")
     i = 0
     for epg_content in epg_contents:
@@ -183,31 +234,80 @@ async def main():
             for channel_id, display_names in channels.items():
                 if len(programmes[channel_id]) == 0:
                     continue
+                
+                channel_in_demo = False
+                matched_demo_name = None
+                matched_4k_name = None
+                
+                for display_name_node in display_names:
+                    display_name = display_name_node[0]
+                    
+                    if display_name in demo_channels_set:
+                        channel_in_demo = True
+                        matched_demo_name = display_name
+                        break
+                    
+                    if display_name in alias_to_main:
+                        main_name = alias_to_main[display_name]
+                        if main_name in demo_channels_set:
+                            channel_in_demo = True
+                            matched_demo_name = main_name
+                            break
+                    
+                    for k4_orig in k4_channels:
+                        if display_name == k4_orig:
+                            base_name = k4_orig[:-2].strip()
+                            if base_name in demo_channels_set:
+                                channel_in_demo = True
+                                matched_demo_name = base_name
+                                matched_4k_name = k4_orig
+                                break
+                        elif display_name == k4_orig[:-2].strip():
+                            channel_in_demo = True
+                            matched_demo_name = display_name
+                            matched_4k_name = k4_orig
+                            break
+                    if channel_in_demo:
+                        break
+                
+                final_channel_id = matched_demo_name
+                final_display_names = display_names.copy()
+                
+                if matched_4k_name and matched_4k_name not in [d[0] for d in final_display_names]:
+                    final_display_names.insert(0, [matched_4k_name, 'zh'])
+                
                 is_in_map = channel_id in all_channels_map
                 map_id = channel_id
-                for display_name_node in display_names:
+                
+                for display_name_node in final_display_names:
                     display_name = display_name_node[0]
                     if is_in_map:
                         break
-                    is_in_map = is_in_map or (display_name  in all_channels_map)
-                    map_id = display_name
-                map_id = all_channels_map.get(map_id, channel_id)
+                    is_in_map = is_in_map or (display_name in all_channels_map)
+                    if not is_in_map:
+                        map_id = display_name
+                
+                if map_id in all_channels_map:
+                    is_in_map = True
+                    map_id = all_channels_map[map_id]
+                
                 if not is_in_map:
-                    all_channel_id.add(channel_id)
-                    all_channel_names[channel_id] = display_names
-                    all_programmes[display_name] = programmes[channel_id]
+                    all_channel_id.add(final_channel_id)
+                    all_channel_names[final_channel_id] = final_display_names
+                    all_programmes[final_channel_id] = programmes[channel_id]
                     all_channels_map[channel_id] = channel_id
-                    for display_name_node in display_names:
+                    for display_name_node in final_display_names:
                         display_name = display_name_node[0]
                         all_channels_map[display_name] = channel_id
-                elif len(all_programmes[map_id]) < len(programmes[channel_id]):
+                elif len(all_programmes.get(map_id, [])) < len(programmes[channel_id]):
                     all_programmes[map_id] = programmes[channel_id]
-                    for display_name_node in display_names:
+                    for display_name_node in final_display_names:
                         display_name = display_name_node[0]
                         if display_name not in all_channels_map:
                             all_channel_names[map_id].append(display_name_node)
                             all_channels_map[display_name] = map_id
-                pbar.update(1)  # 更新进度条
+                pbar.update(1)
+    
     print("Writing to XML...")
     write_to_xml(all_channel_id, all_channel_names,
                 all_programmes, 'output/epg.xml')
