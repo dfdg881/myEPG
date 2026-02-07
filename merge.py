@@ -182,9 +182,9 @@ def get_alias_mapping():
 
 
 def get_4k_channels():
-    """读取 4k.txt 获取4K频道列表"""
+    """读取 4K.txt 获取4K频道列表"""
     channels = set()
-    with open('4k.txt', 'r', encoding='utf-8') as file:
+    with open('4K.txt', 'r', encoding='utf-8') as file:
         for line in file:
             line = line.strip()
             if line and not line.startswith('#'):
