@@ -15,52 +15,144 @@ from tqdm import tqdm  # 引入 tqdm 的同步支持
 TZ_UTC_PLUS_8 = timezone(timedelta(hours=8))
 
 
-def read_demo_channels():
-    """Read demo.txt to get the list of required channels"""
-    demo_channels = set()
-    if os.path.exists('demo.txt'):
-        with open('demo.txt', 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    demo_channels.add(line)
-    return demo_channels
-
-
-def read_alias_mapping():
-    """Read alias.txt to create an alias mapping dictionary"""
-    alias_map = {}
-    if os.path.exists('alias.txt'):
-        with open('alias.txt', 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line and ',' in line:
-                    parts = line.split(',')
-                    main_name = parts[0].strip()
-                    for alias in parts[1:]:
-                        alias = alias.strip()
-                        if alias:
-                            alias_map[alias] = main_name
-    return alias_map
-
-
-def read_4k_channels():
-    """Read 4K.txt to get 4K channel names that need special handling"""
-    k4_channels = set()
-    if os.path.exists('4k.txt'):
-        with open('4k.txt', 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    k4_channels.add(line)
-    return k4_channels
-
-
 def transform2_zh_hans(string):
     cc = OpenCC("t2s")
     new_str = cc.convert(string)
     return new_str
 
+
+# ----------------------
+# 辅助：从文本文件读取节目条目
+def load_lines(path):
+    lines = []
+    if not os.path.exists(path):
+        return lines
+    with open(path, 'r', encoding='utf-8') as f:
+        for raw in f:
+            s = raw.rstrip('\n').strip()
+            if not s:
+                continue
+            if s.startswith('#'):
+                continue
+            lines.append(raw.rstrip('\n'))  # 保留原始文本格式用于输出
+    return lines
+
+
+def parse_aliases(path):
+    mapping = {}
+    if not os.path.exists(path):
+        return mapping
+    with open(path, 'r', encoding='utf-8') as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith('#'):
+                continue
+            # 支持多种分隔符：|、:、=
+            for sep in ['|', ':', '=']:
+                if sep in line:
+                    left, right = line.split(sep, 1)
+                    key = left.strip().lower()
+                    val = right.strip()
+                    if key:
+                        mapping[key] = val
+                    break
+            # 未找到分隔符的行忽略
+    return mapping
+
+
+def normalize_name(name, alias_map):
+    if name is None:
+        return ''
+    s = name.strip()
+    s = s.lower()
+    if s in alias_map:
+        s = alias_map[s]
+    return s
+
+
+def _make_programme(channel_id, title, start_dt):
+    """Create a minimal programme element for local sources.
+    start_dt should be a timezone-aware datetime in TZ_UTC_PLUS_8.
+    Returns an xml.etree.ElementTree.Element representing a <programme>.
+    """
+    start = start_dt.strftime("%Y%m%d%H%M%S %z")
+    stop_dt = start_dt + timedelta(minutes=30)
+    stop = stop_dt.strftime("%Y%m%d%H%M%S %z")
+    p = ET.Element('programme', attrib={'channel': channel_id, 'start': start, 'stop': stop})
+    t = ET.SubElement(p, 'title')
+    t.text = title
+    return p
+
+
+def _load_local_sources(alias_map):
+    """Load local channel lists from demo.txt (normal) and 4k.txt (4K).
+    Deduplicate between sources (prefer normal/demo entries).
+    Returns:
+      channels: dict[channel_id] -> display_names_list
+      programmes: dict[channel_id] -> list[programme_elements]
+    """
+    channels = {}
+    programmes = {}
+
+    today = datetime.now(TZ_UTC_PLUS_8).date()
+    # Base start times for local programmes
+    base_normal = datetime.now(TZ_UTC_PLUS_8).replace(year=today.year, month=today.month, day=today.day, hour=10, minute=0, second=0, microsecond=0)
+    base_fourk  = datetime.now(TZ_UTC_PLUS_8).replace(year=today.year, month=today.month, day=today.day, hour=16, minute=0, second=0, microsecond=0)
+
+    # Load lists
+    normal_lines = load_lines('demo.txt')
+    k_lines = load_lines('4k.txt')
+
+    normal_map = {}
+    fourk_map = {}
+    # Normalize and prepare channels for normal (demo.txt)
+    for raw in normal_lines:
+        name = raw.strip()
+        if not name:
+            continue
+        cid = normalize_name(name, alias_map)
+        if not cid:
+            cid = name
+        if cid in normal_map:
+            continue
+        normal_map[cid] = name
+
+    # Normalize and prepare channels for 4K (4k.txt)
+    for raw in k_lines:
+        name = raw.strip()
+        if not name:
+            continue
+        cid = normalize_name(name, alias_map)
+        if not cid:
+            cid = name
+        if cid in fourk_map:
+            continue
+        fourk_map[cid] = name
+
+    # Deduplicate: prefer normal/demo, ignore duplicates found in 4K
+    all_ids = {}
+    for cid, disp in normal_map.items():
+        all_ids[cid] = {'display': disp, 'source': 'normal'}
+    for cid, disp in fourk_map.items():
+        if cid in all_ids:
+            # duplicate between normal and 4K, skip 4K entry
+            continue
+        all_ids[cid] = {'display': disp, 'source': '4k'}
+
+    # Build channels and fake programmes for local sources
+    for cid, info in all_ids.items():
+        display = info['display']
+        channels[cid] = [[display, 'zh']]
+        # Create a single placeholder programme per channel
+        if info['source'] == 'normal':
+            title = f"普通节目：{display}"
+            p = _make_programme(cid, title, base_normal)
+        else:
+            title = f"4K节目：{display}"
+            p = _make_programme(cid, title, base_fourk)
+        programmes[cid] = [p]
+
+    return channels, programmes
 
 async def fetch_epg(url):
     connector = aiohttp.TCPConnector(limit=16, ssl=False)
@@ -201,58 +293,9 @@ def get_urls():
     return urls
 
 
-def normalize_channel_name(name):
-    """Normalize channel name by removing 4K suffix for matching purposes"""
-    # Remove 4K/4k/4K+ variations but keep original name for display
-    normalized = re.sub(r'4K.*$', '', name, flags=re.IGNORECASE)
-    normalized = normalized.rstrip('+- ')
-    return normalized
-
-
-def get_matching_demo_channel(display_name, demo_channels, alias_map, k4_channels):
-    """Find if the display name matches a demo channel or its alias"""
-    # Check if the original name is in demo channels
-    if display_name in demo_channels:
-        return display_name
-    
-    # Check if the normalized name (without 4K) is in demo channels
-    normalized_name = normalize_channel_name(display_name)
-    if normalized_name in demo_channels:
-        return normalized_name
-    
-    # Check if the original name has an alias in demo channels
-    if display_name in alias_map:
-        alias_main = alias_map[display_name]
-        if alias_main in demo_channels:
-            return alias_main
-    
-    # Check if normalized name has an alias in demo channels
-    if normalized_name in alias_map:
-        alias_main = alias_map[normalized_name]
-        if alias_main in demo_channels:
-            return alias_main
-    
-    # Check if any demo channel name matches this one via alias mapping
-    for demo_ch in demo_channels:
-        if demo_ch in alias_map:
-            # If demo channel has an alias and this name matches that alias
-            if alias_map[demo_ch] == display_name:
-                return demo_ch
-        # Also check the reverse - if current name is an alias for a demo channel
-        if display_name in alias_map and alias_map[display_name] == demo_ch:
-            return demo_ch
-    
-    return None
-
-
 async def main():
-    # Read demo channels, aliases and 4K channels
-    demo_channels = read_demo_channels()
-    alias_map = read_alias_mapping()
-    k4_channels = read_4k_channels()
-    
-    print(f"Loaded {len(demo_channels)} demo channels, {len(alias_map)} aliases, {len(k4_channels)} 4K channels")
-    
+    # Load alias map for name normalization
+    alias_map = parse_aliases('alias.txt')
     urls = get_urls()
     tasks = [fetch_epg(url) for url in urls]
     print("Fetching EPG data...")
@@ -275,73 +318,60 @@ async def main():
             for channel_id, display_names in channels.items():
                 if len(programmes[channel_id]) == 0:
                     continue
-                
-                # Find matching demo channel
-                matching_demo_channel = None
-                for display_name_node in display_names:
-                    display_name = display_name_node[0]
-                    matching_demo_channel = get_matching_demo_channel(display_name, demo_channels, alias_map, k4_channels)
-                    if matching_demo_channel:
-                        break
-                
-                # Skip channels that don't match demo channels
-                if not matching_demo_channel:
-                    pbar.update(1)
-                    continue
-                
-                # Handle 4K channels: normalize the name for matching but keep original for display
-                original_display_names = display_names[:]
-                processed_display_names = []
-                
-                for display_name_node in display_names:
-                    name = display_name_node[0]
-                    lang = display_name_node[1]
-                    
-                    # If it's a 4K channel from 4K.txt, we'll use the normalized name for matching
-                    if name in k4_channels:
-                        # Add the normalized version (without 4K) for matching
-                        normalized_name = normalize_channel_name(name)
-                        processed_display_names.append([normalized_name, lang])
-                        # Also add the original 4K name for potential matching
-                        processed_display_names.append([name, lang])
-                    else:
-                        processed_display_names.append([name, lang])
-                
-                # Check if any of the processed names already exist in the map
-                is_in_map = False
+                is_in_map = channel_id in all_channels_map
                 map_id = channel_id
-                
-                # Look for an existing mapping using processed names
-                for display_name_node in processed_display_names:
+                for display_name_node in display_names:
                     display_name = display_name_node[0]
-                    if display_name in all_channels_map:
-                        is_in_map = True
-                        map_id = all_channels_map[display_name]
+                    if is_in_map:
                         break
-                
+                    is_in_map = is_in_map or (display_name  in all_channels_map)
+                    map_id = display_name
+                map_id = all_channels_map.get(map_id, channel_id)
                 if not is_in_map:
-                    # Add the channel to our collection
                     all_channel_id.add(channel_id)
-                    # Use original display names to preserve 4K names
-                    all_channel_names[channel_id] = original_display_names
+                    all_channel_names[channel_id] = display_names
                     all_programmes[channel_id] = programmes[channel_id]
                     all_channels_map[channel_id] = channel_id
-                    for display_name_node in processed_display_names:
+                    for display_name_node in display_names:
                         display_name = display_name_node[0]
-                        if display_name not in all_channels_map:
-                            all_channels_map[display_name] = channel_id
-                else:
-                    # Update programmes if new source has more data
-                    if map_id in all_programmes and len(all_programmes[map_id]) < len(programmes[channel_id]):
-                        all_programmes[map_id] = programmes[channel_id]
-                    # Add new display names to existing channel if they don't already exist
-                    # Preserve original display names to keep 4K versions
-                    for display_name_node in original_display_names:
+                        all_channels_map[display_name] = channel_id
+                elif len(all_programmes[map_id]) < len(programmes[channel_id]):
+                    all_programmes[map_id] = programmes[channel_id]
+                    for display_name_node in display_names:
                         display_name = display_name_node[0]
                         if display_name not in all_channels_map:
                             all_channel_names[map_id].append(display_name_node)
                             all_channels_map[display_name] = map_id
                 pbar.update(1)  # 更新进度条
+    # Merge local sources (demo.txt and 4k.txt) into the final epg data
+    local_channels, local_programmes = _load_local_sources(alias_map)
+    # Simple merge: add local channels if not present, else keep the larger set of programmes
+    for cid, disp_names in local_channels.items():
+        is_in_map = cid in all_channels_map
+        map_id = cid
+        if not is_in_map:
+            all_channel_id.add(cid)
+            all_channel_names[cid] = disp_names
+            # attach local programmes under the local channel id
+            all_programmes[cid] = local_programmes.get(cid, [])
+            all_channels_map[cid] = cid
+            for display_node in disp_names:
+                all_channels_map[display_node[0]] = cid
+        else:
+            # If already present, decide whether to replace with local data based on length
+            # Identify map target from existing mappings
+            for display_node in disp_names:
+                display_name = display_node[0]
+                if display_name in all_channels_map:
+                    map_id = all_channels_map[display_name]
+                    break
+            if cid in local_programmes and len(local_programmes[cid]) > len(all_programmes.get(map_id, [])):
+                all_programmes[map_id] = local_programmes[cid]
+                for display_node in disp_names:
+                    display_name = display_node[0]
+                    if display_name not in all_channels_map:
+                        all_channel_names[map_id].append(display_node)
+                        all_channels_map[display_name] = map_id
     print("Writing to XML...")
     write_to_xml(all_channel_id, all_channel_names,
                 all_programmes, 'output/epg.xml')
