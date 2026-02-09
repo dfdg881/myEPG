@@ -8,7 +8,6 @@ import gzip
 import shutil
 from xml.dom import minidom
 import re
-from copy import deepcopy
 from opencc import OpenCC
 import os
 from tqdm import tqdm  # 引入 tqdm 的同步支持
@@ -167,174 +166,6 @@ def get_urls():
     return urls
 
 
-def normalize_channel_name(name):
-    if not name:
-        return ""
-    name = transform2_zh_hans(name).strip().lower()
-    name = re.sub(r"[\s\-_/]", "", name)
-    return name
-
-
-def get_demo_channels():
-    channels = []
-    with open('demo.txt', 'r', encoding='utf-8') as file:
-        for line in file:
-            line = line.strip()
-            if line and not line.startswith('#'):
-                channels.append(line)
-    return channels
-
-
-def get_alias_map():
-    alias_map = defaultdict(set)
-    if not os.path.exists('alias.txt'):
-        return alias_map
-    with open('alias.txt', 'r', encoding='utf-8') as file:
-        for line in file:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            names = [item.strip() for item in line.split(',') if item.strip()]
-            if not names:
-                continue
-            canonical = names[0]
-            for alias_name in names:
-                alias_map[canonical].add(alias_name)
-    return alias_map
-
-
-def is_cctv16_4k(name):
-    n_name = normalize_channel_name(name)
-    return 'cctv16' in n_name and '4k' in n_name
-
-
-def is_cctv16_non_4k(name):
-    n_name = normalize_channel_name(name)
-    return 'cctv16' in n_name and '4k' not in n_name
-
-
-def build_target_aliases(demo_channels, alias_map):
-    demo_norm_to_name = {normalize_channel_name(ch): ch for ch in demo_channels}
-    target_aliases = {}
-    for target_name in demo_channels:
-        target_norm = normalize_channel_name(target_name)
-        alias_set = {target_norm}
-
-        for canonical, aliases in alias_map.items():
-            canonical_norm = normalize_channel_name(canonical)
-            alias_norms = {normalize_channel_name(alias_name) for alias_name in aliases}
-            if canonical_norm == target_norm or target_norm in alias_norms:
-                alias_set.update(alias_norms)
-                alias_set.add(canonical_norm)
-
-        target_aliases[target_name] = alias_set
-
-    return demo_norm_to_name, target_aliases
-
-
-def match_channel_to_demo(candidates, demo_channels, demo_norm_to_name, target_aliases):
-    # Special handling for duplicated CCTV16 aliases:
-    # keep CCTV16-4K and CCTV-16 as two distinct channels.
-    has_4k = any(is_cctv16_4k(name) for name in candidates)
-    has_non_4k = any(is_cctv16_non_4k(name) for name in candidates)
-    if has_4k and 'CCTV16-4K' in demo_channels:
-        return 'CCTV16-4K'
-    if has_non_4k and 'CCTV-16' in demo_channels:
-        return 'CCTV-16'
-
-    candidate_norms = []
-    for name in candidates:
-        n_name = normalize_channel_name(name)
-        if n_name:
-            candidate_norms.append(n_name)
-
-    # exact match with demo names first
-    for n_name in candidate_norms:
-        if n_name in demo_norm_to_name:
-            return demo_norm_to_name[n_name]
-
-    # exact match with alias map
-    for target_name in demo_channels:
-        aliases = target_aliases[target_name]
-        if any(n_name in aliases for n_name in candidate_norms):
-            return target_name
-
-    # fuzzy contains match
-    best_target = None
-    best_score = -1
-    for target_name in demo_channels:
-        target_norm = normalize_channel_name(target_name)
-        aliases = target_aliases[target_name]
-        score = 0
-        for n_name in candidate_norms:
-            if n_name == target_norm:
-                score = max(score, 100)
-            elif any(n_name in alias_name or alias_name in n_name for alias_name in aliases):
-                score = max(score, 10)
-            elif n_name in target_norm or target_norm in n_name:
-                score = max(score, 5)
-        if score > best_score:
-            best_score = score
-            best_target = target_name
-
-    return best_target if best_score > 0 else None
-
-
-def remap_to_demo_channels(all_channel_id, all_channel_names, all_programmes):
-    demo_channels = get_demo_channels()
-    alias_map = get_alias_map()
-    demo_norm_to_name, target_aliases = build_target_aliases(demo_channels, alias_map)
-
-    remapped_channel_ids = []
-    remapped_channel_names = defaultdict(list)
-    remapped_programmes = defaultdict(list)
-
-    for channel_id in all_channel_id:
-        display_names = all_channel_names.get(channel_id, [])
-        candidates = [channel_id]
-        for node in display_names:
-            if node and node[0]:
-                candidates.append(node[0])
-
-        target_name = match_channel_to_demo(
-            candidates, demo_channels, demo_norm_to_name, target_aliases)
-        if target_name is None:
-            continue
-
-        programme_list = all_programmes.get(channel_id, [])
-        if len(programme_list) == 0:
-            for name in candidates:
-                if len(all_programmes.get(name, [])) > 0:
-                    programme_list = all_programmes[name]
-                    break
-        if len(programme_list) == 0:
-            continue
-
-        if target_name not in remapped_channel_ids:
-            remapped_channel_ids.append(target_name)
-
-        # Keep the richer programme source when multiple channels map to same target.
-        if len(remapped_programmes[target_name]) < len(programme_list):
-            remapped_programmes[target_name] = programme_list
-
-        remapped_channel_names[target_name] = [[target_name, 'zh']]
-
-    # Fallback: if CCTV16-4K has no programme, reuse CCTV-16 programme.
-    if 'CCTV16-4K' in demo_channels and len(remapped_programmes['CCTV16-4K']) == 0:
-        if len(remapped_programmes['CCTV-16']) > 0:
-            remapped_programmes['CCTV16-4K'] = [deepcopy(prog) for prog in remapped_programmes['CCTV-16']]
-
-    # Keep both CCTV-16 and CCTV16-4K in final output when configured in demo.txt.
-    for fixed_name in ('CCTV-16', 'CCTV16-4K'):
-        if fixed_name in demo_channels and fixed_name not in remapped_channel_ids:
-            remapped_channel_ids.append(fixed_name)
-            remapped_channel_names[fixed_name] = [[fixed_name, 'zh']]
-
-    # Keep final order as in demo.txt
-    ordered_ids = [name for name in demo_channels if name in remapped_channel_ids]
-    return ordered_ids, remapped_channel_names, remapped_programmes
-
-
 async def main():
     urls = get_urls()
     tasks = [fetch_epg(url) for url in urls]
@@ -384,10 +215,8 @@ async def main():
                             all_channels_map[display_name] = map_id
                 pbar.update(1)  # 更新进度条
     print("Writing to XML...")
-    remapped_channel_ids, remapped_channel_names, remapped_programmes = remap_to_demo_channels(
-        all_channel_id, all_channel_names, all_programmes)
-    write_to_xml(remapped_channel_ids, remapped_channel_names,
-                remapped_programmes, 'output/epg.xml')
+    write_to_xml(all_channel_id, all_channel_names,
+                all_programmes, 'output/epg.xml')
     compress_to_gz('output/epg.xml', 'output/epg.gz')
 
 if __name__ == '__main__':
