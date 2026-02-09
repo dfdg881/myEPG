@@ -318,6 +318,12 @@ def remap_to_demo_channels(all_channel_id, all_channel_names, all_programmes):
 
         remapped_channel_names[target_name] = [[target_name, 'zh']]
 
+    # Keep both CCTV-16 and CCTV16-4K in final output when configured in demo.txt.
+    for fixed_name in ('CCTV-16', 'CCTV16-4K'):
+        if fixed_name in demo_channels and fixed_name not in remapped_channel_ids:
+            remapped_channel_ids.append(fixed_name)
+            remapped_channel_names[fixed_name] = [[fixed_name, 'zh']]
+
     # Keep final order as in demo.txt
     ordered_ids = [name for name in demo_channels if name in remapped_channel_ids]
     return ordered_ids, remapped_channel_names, remapped_programmes
