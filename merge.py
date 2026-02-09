@@ -1,5 +1,6 @@
 import xml.etree.ElementTree as ET
 from collections import defaultdict
+from collections import OrderedDict
 import aiohttp
 import asyncio
 from tqdm.asyncio import tqdm_asyncio  # 引入 tqdm 的异步支持
@@ -42,6 +43,139 @@ async def fetch_epg(url):
         print(f"{url}其他错误: {e}")
     return None
 
+def process_display_name(display_name):
+    if display_name.endswith('高清'):
+        display_name = display_name[:-2]
+    return display_name
+
+
+def normalize_name(name):
+    if not name:
+        return ""
+    name = transform2_zh_hans(name)
+    name = name.lower()
+    name = re.sub(r"[\s\-_()（）]+", "", name)
+    return name
+
+
+def load_demo_channels(filename='demo.txt'):
+    channels = []
+    seen = set()
+    with open(filename, 'r', encoding='utf-8') as file:
+        for raw in file:
+            name = raw.strip()
+            if not name or name.startswith('#'):
+                continue
+            if name in seen:
+                continue
+            seen.add(name)
+            channels.append(name)
+    return channels
+
+
+def load_alias_map(filename='alias.txt'):
+    alias_map = OrderedDict()
+    normalized_alias_map = defaultdict(set)
+    with open(filename, 'r', encoding='utf-8') as file:
+        for raw in file:
+            line = raw.strip()
+            if not line or line.startswith('#'):
+                continue
+            names = [x.strip() for x in line.split(',') if x.strip()]
+            if not names:
+                continue
+            canonical = names[0]
+            values = set(names)
+            values.add(canonical)
+            alias_map[canonical] = values
+            for n in values:
+                normalized_alias_map[normalize_name(n)].update(values)
+    return alias_map, normalized_alias_map
+
+
+def is_4k_channel(name):
+    return '4k' in normalize_name(name)
+
+
+def get_alias_terms(channel_name, alias_map, normalized_alias_map):
+    terms = set()
+    terms.add(channel_name)
+    if channel_name in alias_map:
+        terms.update(alias_map[channel_name])
+    normalized = normalize_name(channel_name)
+    if normalized in normalized_alias_map:
+        terms.update(normalized_alias_map[normalized])
+    terms.add(channel_name.replace('-', ''))
+    return [normalize_name(x) for x in terms if x]
+
+
+def score_channel_match(alias_terms, source_names, target_name):
+    source_norms = [normalize_name(x) for x in source_names if x]
+    source_norms = [x for x in source_norms if x]
+    if not source_norms:
+        return -1
+
+    target_is_4k = is_4k_channel(target_name)
+    best = -1
+
+    for term in alias_terms:
+        for source in source_norms:
+            score = -1
+            if term == source:
+                score = 100
+            elif term in source or source in term:
+                score = 70
+
+            if score < 0:
+                continue
+
+            source_is_4k = '4k' in source
+            if target_is_4k and not source_is_4k:
+                score -= 25
+            if (not target_is_4k) and source_is_4k:
+                score -= 25
+
+            if score > best:
+                best = score
+
+    return best
+
+
+def select_channels_for_demo(demo_channels, alias_map, normalized_alias_map, candidate_channels):
+    selected_ids = []
+    selected_names = defaultdict(list)
+    selected_programmes = defaultdict(list)
+    used_candidate_keys = set()
+
+    for demo_name in demo_channels:
+        alias_terms = get_alias_terms(demo_name, alias_map, normalized_alias_map)
+        best_key = None
+        best_score = -1
+        best_len = -1
+
+        for key, data in candidate_channels.items():
+            if key in used_candidate_keys:
+                continue
+
+            score = score_channel_match(alias_terms, data['names'], demo_name)
+            if score < 0:
+                continue
+
+            prog_len = len(data['programmes'])
+            if score > best_score or (score == best_score and prog_len > best_len):
+                best_key = key
+                best_score = score
+                best_len = prog_len
+
+        if best_key is None:
+            continue
+
+        used_candidate_keys.add(best_key)
+        selected_ids.append(demo_name)
+        selected_names[demo_name] = [[demo_name, 'zh']]
+        selected_programmes[demo_name] = candidate_channels[best_key]['programmes']
+
+    return selected_ids, selected_names, selected_programmes
 
 def parse_epg(epg_content):
     try:
@@ -59,7 +193,9 @@ def parse_epg(epg_content):
         channel_id = transform2_zh_hans(channel.get('id'))
         channel_display_names = []
         for name in channel.findall('display-name'):
-            channel_display_names.append([transform2_zh_hans(name.text), name.get('lang', 'zh')])
+            t_name = transform2_zh_hans(name.text)
+            t_name = process_display_name(t_name)
+            channel_display_names.append([t_name, name.get('lang', 'zh')])
         if not channel_id.isdigit() and channel_id not in channel_display_names:
             channel_display_names.append([channel_id, 'zh'])
         channels[channel_id] = channel_display_names
@@ -107,7 +243,7 @@ def parse_epg(epg_content):
             if langattr is not None:
                 channel_elem_d.set('lang', langattr)
         programmes[channel_id].append(channel_elem)
-        
+
     # Filter channels that don't have any program ending today
     channels = {k: v for k, v in channels.items() if k in valid_channels}
     # Optional: Filter programmes as well to keep data consistent, 
@@ -160,87 +296,14 @@ def get_urls():
     return urls
 
 
-def normalize_channel_name(name):
-    if name is None:
-        return ''
-    name = transform2_zh_hans(name)
-    name = name.strip()
-    name = re.sub(r'\s+', '', name)
-    name = name.replace('－', '-')
-    return name
-
-
-def load_demo_channels(filename='demo.txt'):
-    channels = []
-    with open(filename, 'r', encoding='utf-8') as file:
-        for line in file:
-            line = line.strip()
-            if not line:
-                continue
-            channels.append(line)
-    return channels
-
-
-def load_alias_map(filename='alias.txt'):
-    alias_map = {}
-    reverse_map = {}
-    with open(filename, 'r', encoding='utf-8') as file:
-        for line in file:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            parts = [p.strip() for p in line.split(',') if p.strip()]
-            if not parts:
-                continue
-            canonical = parts[0]
-            aliases = parts[1:]
-            alias_map[canonical] = aliases
-            for alias in aliases:
-                reverse_map[alias] = canonical
-    return alias_map, reverse_map
-
-
-def build_demo_matchers(demo_channels, alias_map):
-    canonical_set = set()
-    normalized_canonical = {}
-    normalized_alias_to_canonical = {}
-    for canonical in demo_channels:
-        normalized = normalize_channel_name(canonical)
-        canonical_set.add(canonical)
-        normalized_canonical[normalized] = canonical
-        aliases = alias_map.get(canonical, [])
-        for alias in aliases:
-            normalized_alias = normalize_channel_name(alias)
-            if normalized_alias:
-                normalized_alias_to_canonical[normalized_alias] = canonical
-    return canonical_set, normalized_canonical, normalized_alias_to_canonical
-
-
-def match_canonical_channel(name, normalized_canonical, normalized_alias_to_canonical):
-    normalized = normalize_channel_name(name)
-    if normalized in normalized_canonical:
-        return normalized_canonical[normalized]
-    if normalized in normalized_alias_to_canonical:
-        return normalized_alias_to_canonical[normalized]
-    for alias_norm, canonical in normalized_alias_to_canonical.items():
-        if alias_norm and (alias_norm in normalized or normalized in alias_norm):
-            return canonical
-    return None
-
-
 async def main():
     urls = get_urls()
     demo_channels = load_demo_channels('demo.txt')
-    alias_map, alias_reverse = load_alias_map('alias.txt')
-    canonical_set, normalized_canonical, normalized_alias_to_canonical = build_demo_matchers(
-        demo_channels, alias_map
-    )
+    alias_map, normalized_alias_map = load_alias_map('alias.txt')
     tasks = [fetch_epg(url) for url in urls]
     print("Fetching EPG data...")
     epg_contents = await tqdm_asyncio.gather(*tasks, desc="Fetching URLs")
-    all_channel_id = set()
-    all_channel_names = defaultdict(list)
-    all_programmes = defaultdict(list)
+    candidate_channels = {}
     print("Finished.")
     i = 0
     for epg_content in epg_contents:
@@ -255,32 +318,32 @@ async def main():
             for channel_id, display_names in channels.items():
                 if len(programmes[channel_id]) == 0:
                     continue
-                canonical = match_canonical_channel(
-                    channel_id, normalized_canonical, normalized_alias_to_canonical
-                )
-                if canonical is None:
+                if channel_id not in candidate_channels:
+                    candidate_channels[channel_id] = {
+                        'names': [x[0] for x in display_names if x and x[0]],
+                        'programmes': programmes[channel_id]
+                    }
+                else:
+                    existing_names = set(candidate_channels[channel_id]['names'])
                     for display_name_node in display_names:
                         display_name = display_name_node[0]
-                        canonical = match_canonical_channel(
-                            display_name, normalized_canonical, normalized_alias_to_canonical
-                        )
-                        if canonical is not None:
-                            break
-                if canonical is None:
-                    pbar.update(1)
-                    continue
-                if canonical not in canonical_set:
-                    pbar.update(1)
-                    continue
-                all_channel_id.add(canonical)
-                if canonical not in all_channel_names:
-                    all_channel_names[canonical] = [[canonical, 'zh']]
-                if canonical not in all_programmes or len(all_programmes[canonical]) < len(programmes[channel_id]):
-                    all_programmes[canonical] = programmes[channel_id]
+                        if display_name and display_name not in existing_names:
+                            candidate_channels[channel_id]['names'].append(display_name)
+                            existing_names.add(display_name)
+                    if len(candidate_channels[channel_id]['programmes']) < len(programmes[channel_id]):
+                        candidate_channels[channel_id]['programmes'] = programmes[channel_id]
                 pbar.update(1)  # 更新进度条
+
+    channel_ids, channel_names, selected_programmes = select_channels_for_demo(
+        demo_channels,
+        alias_map,
+        normalized_alias_map,
+        candidate_channels
+    )
+
     print("Writing to XML...")
-    write_to_xml(all_channel_id, all_channel_names,
-                all_programmes, 'output/epg.xml')
+    write_to_xml(channel_ids, channel_names,
+                selected_programmes, 'output/epg.xml')
     compress_to_gz('output/epg.xml', 'output/epg.gz')
 
 if __name__ == '__main__':
