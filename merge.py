@@ -42,6 +42,10 @@ async def fetch_epg(url):
         print(f"{url}其他错误: {e}")
     return None
 
+def process_display_name(display_name):
+    if display_name.endswith('高清'):
+        display_name = display_name[:-2]
+    return display_name
 
 def parse_epg(epg_content):
     try:
@@ -59,7 +63,9 @@ def parse_epg(epg_content):
         channel_id = transform2_zh_hans(channel.get('id'))
         channel_display_names = []
         for name in channel.findall('display-name'):
-            channel_display_names.append([transform2_zh_hans(name.text), name.get('lang', 'zh')])
+            t_name = transform2_zh_hans(name.text)
+            t_name = process_display_name(t_name)
+            channel_display_names.append([t_name, name.get('lang', 'zh')])
         if not channel_id.isdigit() and channel_id not in channel_display_names:
             channel_display_names.append([channel_id, 'zh'])
         channels[channel_id] = channel_display_names
@@ -107,7 +113,7 @@ def parse_epg(epg_content):
             if langattr is not None:
                 channel_elem_d.set('lang', langattr)
         programmes[channel_id].append(channel_elem)
-        
+
     # Filter channels that don't have any program ending today
     channels = {k: v for k, v in channels.items() if k in valid_channels}
     # Optional: Filter programmes as well to keep data consistent, 
