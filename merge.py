@@ -11,7 +11,6 @@ import re
 from opencc import OpenCC
 import os
 from tqdm import tqdm  # 引入 tqdm 的同步支持
-import difflib
 
 TZ_UTC_PLUS_8 = timezone(timedelta(hours=8))
 
@@ -20,6 +19,65 @@ def transform2_zh_hans(string):
     cc = OpenCC("t2s")
     new_str = cc.convert(string)
     return new_str
+
+
+def normalize_name(name):
+    if name is None:
+        return ""
+    return transform2_zh_hans(name).strip().lower()
+
+
+def load_demo_list(path="demo.txt"):
+    demo_list = []
+    with open(path, 'r', encoding='utf-8') as file:
+        for line in file:
+            name = line.strip()
+            if name:
+                demo_list.append(transform2_zh_hans(name))
+    return demo_list
+
+
+def load_alias_map(path="alias.txt"):
+    alias_map = {}
+    with open(path, 'r', encoding='utf-8') as file:
+        for line in file:
+            line = line.strip()
+            if not line:
+                continue
+            parts = [transform2_zh_hans(p.strip()) for p in line.split(',') if p.strip()]
+            if not parts:
+                continue
+            canonical = parts[0]
+            for alias in parts:
+                key = normalize_name(alias)
+                if key and key not in alias_map:
+                    alias_map[key] = canonical
+    return alias_map
+
+
+def resolve_channel_name(channel_id, display_names, demo_map, alias_map):
+    candidates = [channel_id] + display_names
+    for cand in candidates:
+        key = normalize_name(cand)
+        if key in demo_map:
+            return demo_map[key]
+
+    for cand in candidates:
+        key = normalize_name(cand)
+        if "cctv16" in key and "4k" in key:
+            return demo_map.get("cctv16-4k", "CCTV16-4K")
+
+    for cand in candidates:
+        key = normalize_name(cand)
+        if key in ("cctv16", "cctv-16"):
+            return demo_map.get("cctv-16", "CCTV-16")
+
+    for cand in candidates:
+        key = normalize_name(cand)
+        if key in alias_map:
+            return alias_map[key]
+
+    return channel_id
 
 
 async def fetch_epg(url):
@@ -135,8 +193,7 @@ def write_to_xml(channels_id, channels_names, programmes, filename):
                 channel_elem, 'display-name', attrib={"lang": langattr})
             display_name_elem.text = display_name
         for prog in programmes[channel_id]:
-            # Update programme's channel attribute with the proper channel_id
-            prog.set('channel', channel_id)
+            prog.set('channel', channel_id)  # 设置 programme 的 channel 属性
             root.append(prog)
 
     # Beautify the XML output
@@ -152,46 +209,6 @@ def compress_to_gz(input_filename, output_filename):
             shutil.copyfileobj(f_in, f_out)
 
 
-def get_demo_channels():
-    """读取 demo.txt 获取普通节目频道列表"""
-    channels = set()
-    with open('demo.txt', 'r', encoding='utf-8') as file:
-        for line in file:
-            line = line.strip()
-            if line and not line.startswith('#'):
-                channels.add(line)
-    return channels
-
-
-def get_alias_mapping():
-    """读取 alias.txt 获取频道别名映射关系"""
-    alias_map = {}
-    reverse_alias_map = {}
-    with open('alias.txt', 'r', encoding='utf-8') as file:
-        for line in file:
-            line = line.strip()
-            if line and not line.startswith('#'):
-                parts = line.split(',')
-                if len(parts) >= 2:
-                    original_name = parts[0]
-                    aliases = parts[1:]
-                    alias_map[original_name] = aliases
-                    for alias in aliases:
-                        reverse_alias_map[alias] = original_name
-    return alias_map, reverse_alias_map
-
-
-def get_4k_channels():
-    """读取 4K.txt 获取4K频道列表"""
-    channels = set()
-    with open('4K.txt', 'r', encoding='utf-8') as file:
-        for line in file:
-            line = line.strip()
-            if line and not line.startswith('#'):
-                channels.add(line)
-    return channels
-
-
 def get_urls():
     urls = []
     with open('config.txt', 'r', encoding='utf-8') as file:
@@ -202,65 +219,18 @@ def get_urls():
     return urls
 
 
-def fuzzy_match_channel(channel_name, target_channels, threshold=0.6):
-    """
-    模糊匹配频道名称
-    频道名称使用别名映射后的结果<节目源先使用原名匹配如果没有就使用别名>
-    """
-    for target in target_channels:
-        # 直接匹配原名
-        if channel_name == target:
-            return target
-        # 使用 difflib 进行模糊匹配
-        similarity = difflib.SequenceMatcher(None, channel_name, target).ratio()
-        if similarity >= threshold:
-            return target
-    return None
-
-
-def apply_alias_mapping(display_names, alias_map, reverse_alias_map):
-    """
-    应用别名映射到频道显示名称
-    频道名称使用别名映射后的结果<节目源先使用原名匹配如果没有就使用别名>
-    """
-    mapped_names = []
-    for name_node in display_names:
-        original_name = name_node[0]
-        lang = name_node[1]
-        
-        # 检查是否有别名映射
-        if original_name in alias_map:
-            # 添加原名
-            mapped_names.append([original_name, lang])
-            # 添加所有别名
-            for alias in alias_map[original_name]:
-                mapped_names.append([alias, lang])
-        # 检查是否是别名，需要映射回原名
-        elif original_name in reverse_alias_map:
-            mapped_name = reverse_alias_map[original_name]
-            mapped_names.append([mapped_name, lang])
-        else:
-            mapped_names.append([original_name, lang])
-    
-    return mapped_names
-
-
 async def main():
-    # 读取三个输入文件
-    demo_channels = get_demo_channels()  # 普通节目频道列表
-    alias_map, reverse_alias_map = get_alias_mapping()  # 频道别名映射
-    k4_channels = get_4k_channels()  # 4K频道列表
-    
+    demo_list = load_demo_list()
+    demo_map = {normalize_name(name): name for name in demo_list}
+    alias_map = load_alias_map()
     urls = get_urls()
     tasks = [fetch_epg(url) for url in urls]
     print("Fetching EPG data...")
     epg_contents = await tqdm_asyncio.gather(*tasks, desc="Fetching URLs")
-    all_channels_map = {}
     all_channel_id = set()
     all_channel_names = defaultdict(list)
     all_programmes = defaultdict(list)
     print("Finished.")
-    
     i = 0
     for epg_content in epg_contents:
         i += 1
@@ -270,105 +240,31 @@ async def main():
         print("Parsing EPG data...")
         channels, programmes = parse_epg(epg_content)
         print("Finished.")
-        
         with tqdm(total=len(channels), desc="Merging EPG", unit="file") as pbar:
             for channel_id, display_names in channels.items():
                 if len(programmes[channel_id]) == 0:
                     continue
-                
-                # 获取频道显示名称列表
-                channel_display_names = [name_node[0] for name_node in display_names]
-                
-                # 检查是否是4K频道（模糊匹配）
-                is_4k_channel = False
-                matched_4k_channel = None
-                for display_name in channel_display_names:
-                    matched_4k_channel = fuzzy_match_channel(display_name, k4_channels)  # 使用显示名称进行匹配
-                    if matched_4k_channel:
-                        is_4k_channel = True
-                        break
-                
-                # 检查是否是普通频道（模糊匹配）
-                is_demo_channel = False
-                matched_demo_channel = None
-                for display_name in channel_display_names:
-                    matched_demo_channel = fuzzy_match_channel(display_name, demo_channels)  # 使用显示名称进行匹配
-                    if matched_demo_channel:
-                        is_demo_channel = True
-                        break
-                
-                # 检查是否是普通频道（模糊匹配）
-                is_demo_channel = False
-                matched_demo_channel = None
-                for display_name in channel_display_names:
-                    matched_demo_channel = fuzzy_match_channel(display_name, demo_channels)
-                    if matched_demo_channel:
-                        is_demo_channel = True
-                        break
-                
-                # 只处理4K频道或经过过滤后的普通频道
-                # 对于4K频道，即使原始名称不匹配，也应保留其节目信息
-                if not (is_4k_channel or is_demo_channel):
-                    pbar.update(1)
-                    continue
-                
-                # 如果是4K频道，需要特殊处理 - 先尝试映射到非4K版本
-                processed_display_names = []
-                is_4k_adjusted = False
-                
-                if is_4k_channel:
-                    # 尝试找到对应的非4K频道名称
-                    for name_node in display_names:
-                        original_name = name_node[0]
-                        lang = name_node[1]
-                        
-                        # 如果频道名以4K结尾，尝试去掉4K后缀进行匹配
-                        if original_name.endswith('4K') or original_name.endswith('4k'):
-                            non_4k_name = original_name[:-2]  # 去掉最后的4K
-                            # 检查去掉4K后的名称是否在普通频道列表中
-                            if fuzzy_match_channel(non_4k_name, demo_channels):
-                                processed_display_names.append([non_4k_name, lang])
-                                is_4k_adjusted = True
-                            else:
-                                processed_display_names.append([original_name, lang])
-                        else:
-                            processed_display_names.append([original_name, lang])
-                    
-                    if not is_4k_adjusted:
-                        processed_display_names = display_names
+                display_name_strings = [node[0] for node in display_names]
+                canonical = resolve_channel_name(
+                    channel_id, display_name_strings, demo_map, alias_map)
+
+                if canonical not in all_channel_id:
+                    all_channel_id.add(canonical)
+                    all_channel_names[canonical] = [[canonical, 'zh']]
+                    for display_name_node in display_names:
+                        if display_name_node[0] != canonical:
+                            all_channel_names[canonical].append(display_name_node)
+                    all_programmes[canonical] = programmes[channel_id]
                 else:
-                    processed_display_names = display_names
-                
-                # 应用别名映射
-                mapped_display_names = apply_alias_mapping(processed_display_names, alias_map, reverse_alias_map)
-                
-                is_in_map = channel_id in all_channels_map
-                map_id = channel_id
-                for display_name_node in mapped_display_names:
-                    display_name = display_name_node[0]
-                    if is_in_map:
-                        break
-                    is_in_map = is_in_map or (display_name in all_channels_map)
-                    map_id = display_name
-                map_id = all_channels_map.get(map_id, channel_id)
-                
-                if not is_in_map:
-                    all_channel_id.add(channel_id)
-                    all_channel_names[channel_id] = mapped_display_names
-                    all_programmes[channel_id] = programmes[channel_id]
-                    all_channels_map[channel_id] = channel_id
-                    for display_name_node in mapped_display_names:
-                        display_name = display_name_node[0]
-                        all_channels_map[display_name] = channel_id
-                elif len(all_programmes[map_id]) < len(programmes[channel_id]):
-                    all_programmes[map_id] = programmes[channel_id]
-                    for display_name_node in mapped_display_names:
-                        display_name = display_name_node[0]
-                        if display_name not in all_channels_map:
-                            all_channel_names[map_id].append(display_name_node)
-                            all_channels_map[display_name] = map_id
+                    if len(all_programmes[canonical]) < len(programmes[channel_id]):
+                        all_programmes[canonical] = programmes[channel_id]
+                    existing = set((node[0], node[1]) for node in all_channel_names[canonical])
+                    for display_name_node in display_names:
+                        key = (display_name_node[0], display_name_node[1])
+                        if key not in existing:
+                            all_channel_names[canonical].append(display_name_node)
+                            existing.add(key)
                 pbar.update(1)  # 更新进度条
-    
     print("Writing to XML...")
     write_to_xml(all_channel_id, all_channel_names,
                 all_programmes, 'output/epg.xml')
