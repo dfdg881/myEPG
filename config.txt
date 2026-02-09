@@ -1,4 +1,4 @@
 #epg链接，一行一个
-https://liliu.serv00.net/epg/download.php?type=gz
+https://liliu.serv00.net/epg/download.php?type=xml
 https://raw.githubusercontent.com/litiande03/epg/refs/heads/master/pl.xml.gz
-https://epg.baoer.org.cn/e.xml.gz
+https://epg.baoer.org.cn/e.xml
