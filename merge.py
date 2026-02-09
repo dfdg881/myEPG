@@ -1,6 +1,5 @@
 import xml.etree.ElementTree as ET
 from collections import defaultdict
-from collections import OrderedDict
 import aiohttp
 import asyncio
 from tqdm.asyncio import tqdm_asyncio  # 引入 tqdm 的异步支持
@@ -47,135 +46,6 @@ def process_display_name(display_name):
     if display_name.endswith('高清'):
         display_name = display_name[:-2]
     return display_name
-
-
-def normalize_name(name):
-    if not name:
-        return ""
-    name = transform2_zh_hans(name)
-    name = name.lower()
-    name = re.sub(r"[\s\-_()（）]+", "", name)
-    return name
-
-
-def load_demo_channels(filename='demo.txt'):
-    channels = []
-    seen = set()
-    with open(filename, 'r', encoding='utf-8') as file:
-        for raw in file:
-            name = raw.strip()
-            if not name or name.startswith('#'):
-                continue
-            if name in seen:
-                continue
-            seen.add(name)
-            channels.append(name)
-    return channels
-
-
-def load_alias_map(filename='alias.txt'):
-    alias_map = OrderedDict()
-    normalized_alias_map = defaultdict(set)
-    with open(filename, 'r', encoding='utf-8') as file:
-        for raw in file:
-            line = raw.strip()
-            if not line or line.startswith('#'):
-                continue
-            names = [x.strip() for x in line.split(',') if x.strip()]
-            if not names:
-                continue
-            canonical = names[0]
-            values = set(names)
-            values.add(canonical)
-            alias_map[canonical] = values
-            for n in values:
-                normalized_alias_map[normalize_name(n)].update(values)
-    return alias_map, normalized_alias_map
-
-
-def is_4k_channel(name):
-    return '4k' in normalize_name(name)
-
-
-def get_alias_terms(channel_name, alias_map, normalized_alias_map):
-    terms = set()
-    terms.add(channel_name)
-    if channel_name in alias_map:
-        terms.update(alias_map[channel_name])
-    normalized = normalize_name(channel_name)
-    if normalized in normalized_alias_map:
-        terms.update(normalized_alias_map[normalized])
-    terms.add(channel_name.replace('-', ''))
-    return [normalize_name(x) for x in terms if x]
-
-
-def score_channel_match(alias_terms, source_names, target_name):
-    source_norms = [normalize_name(x) for x in source_names if x]
-    source_norms = [x for x in source_norms if x]
-    if not source_norms:
-        return -1
-
-    target_is_4k = is_4k_channel(target_name)
-    best = -1
-
-    for term in alias_terms:
-        for source in source_norms:
-            score = -1
-            if term == source:
-                score = 100
-            elif term in source or source in term:
-                score = 70
-
-            if score < 0:
-                continue
-
-            source_is_4k = '4k' in source
-            if target_is_4k and not source_is_4k:
-                score -= 25
-            if (not target_is_4k) and source_is_4k:
-                score -= 25
-
-            if score > best:
-                best = score
-
-    return best
-
-
-def select_channels_for_demo(demo_channels, alias_map, normalized_alias_map, candidate_channels):
-    selected_ids = []
-    selected_names = defaultdict(list)
-    selected_programmes = defaultdict(list)
-    used_candidate_keys = set()
-
-    for demo_name in demo_channels:
-        alias_terms = get_alias_terms(demo_name, alias_map, normalized_alias_map)
-        best_key = None
-        best_score = -1
-        best_len = -1
-
-        for key, data in candidate_channels.items():
-            if key in used_candidate_keys:
-                continue
-
-            score = score_channel_match(alias_terms, data['names'], demo_name)
-            if score < 0:
-                continue
-
-            prog_len = len(data['programmes'])
-            if score > best_score or (score == best_score and prog_len > best_len):
-                best_key = key
-                best_score = score
-                best_len = prog_len
-
-        if best_key is None:
-            continue
-
-        used_candidate_keys.add(best_key)
-        selected_ids.append(demo_name)
-        selected_names[demo_name] = [[demo_name, 'zh']]
-        selected_programmes[demo_name] = candidate_channels[best_key]['programmes']
-
-    return selected_ids, selected_names, selected_programmes
 
 def parse_epg(epg_content):
     try:
@@ -296,14 +166,172 @@ def get_urls():
     return urls
 
 
+def normalize_channel_name(name):
+    if not name:
+        return ""
+    name = transform2_zh_hans(name).strip().lower()
+    name = re.sub(r"[\s\-_/]", "", name)
+    return name
+
+
+def get_demo_channels():
+    channels = []
+    with open('demo.txt', 'r', encoding='utf-8') as file:
+        for line in file:
+            line = line.strip()
+            if line and not line.startswith('#'):
+                channels.append(line)
+    return channels
+
+
+def get_alias_map():
+    alias_map = defaultdict(set)
+    if not os.path.exists('alias.txt'):
+        return alias_map
+    with open('alias.txt', 'r', encoding='utf-8') as file:
+        for line in file:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            names = [item.strip() for item in line.split(',') if item.strip()]
+            if not names:
+                continue
+            canonical = names[0]
+            for alias_name in names:
+                alias_map[canonical].add(alias_name)
+    return alias_map
+
+
+def is_cctv16_4k(name):
+    n_name = normalize_channel_name(name)
+    return 'cctv16' in n_name and '4k' in n_name
+
+
+def is_cctv16_non_4k(name):
+    n_name = normalize_channel_name(name)
+    return 'cctv16' in n_name and '4k' not in n_name
+
+
+def build_target_aliases(demo_channels, alias_map):
+    demo_norm_to_name = {normalize_channel_name(ch): ch for ch in demo_channels}
+    target_aliases = {}
+    for target_name in demo_channels:
+        target_norm = normalize_channel_name(target_name)
+        alias_set = {target_norm}
+
+        for canonical, aliases in alias_map.items():
+            canonical_norm = normalize_channel_name(canonical)
+            alias_norms = {normalize_channel_name(alias_name) for alias_name in aliases}
+            if canonical_norm == target_norm or target_norm in alias_norms:
+                alias_set.update(alias_norms)
+                alias_set.add(canonical_norm)
+
+        target_aliases[target_name] = alias_set
+
+    return demo_norm_to_name, target_aliases
+
+
+def match_channel_to_demo(candidates, demo_channels, demo_norm_to_name, target_aliases):
+    # Special handling for duplicated CCTV16 aliases:
+    # keep CCTV16-4K and CCTV-16 as two distinct channels.
+    has_4k = any(is_cctv16_4k(name) for name in candidates)
+    has_non_4k = any(is_cctv16_non_4k(name) for name in candidates)
+    if has_4k and 'CCTV16-4K' in demo_channels:
+        return 'CCTV16-4K'
+    if has_non_4k and 'CCTV-16' in demo_channels:
+        return 'CCTV-16'
+
+    candidate_norms = []
+    for name in candidates:
+        n_name = normalize_channel_name(name)
+        if n_name:
+            candidate_norms.append(n_name)
+
+    # exact match with demo names first
+    for n_name in candidate_norms:
+        if n_name in demo_norm_to_name:
+            return demo_norm_to_name[n_name]
+
+    # exact match with alias map
+    for target_name in demo_channels:
+        aliases = target_aliases[target_name]
+        if any(n_name in aliases for n_name in candidate_norms):
+            return target_name
+
+    # fuzzy contains match
+    best_target = None
+    best_score = -1
+    for target_name in demo_channels:
+        target_norm = normalize_channel_name(target_name)
+        aliases = target_aliases[target_name]
+        score = 0
+        for n_name in candidate_norms:
+            if n_name == target_norm:
+                score = max(score, 100)
+            elif any(n_name in alias_name or alias_name in n_name for alias_name in aliases):
+                score = max(score, 10)
+            elif n_name in target_norm or target_norm in n_name:
+                score = max(score, 5)
+        if score > best_score:
+            best_score = score
+            best_target = target_name
+
+    return best_target if best_score > 0 else None
+
+
+def remap_to_demo_channels(all_channel_id, all_channel_names, all_programmes):
+    demo_channels = get_demo_channels()
+    alias_map = get_alias_map()
+    demo_norm_to_name, target_aliases = build_target_aliases(demo_channels, alias_map)
+
+    remapped_channel_ids = []
+    remapped_channel_names = defaultdict(list)
+    remapped_programmes = defaultdict(list)
+
+    for channel_id in all_channel_id:
+        display_names = all_channel_names.get(channel_id, [])
+        candidates = [channel_id]
+        for node in display_names:
+            if node and node[0]:
+                candidates.append(node[0])
+
+        target_name = match_channel_to_demo(
+            candidates, demo_channels, demo_norm_to_name, target_aliases)
+        if target_name is None:
+            continue
+
+        programme_list = all_programmes.get(channel_id, [])
+        if len(programme_list) == 0:
+            for name in candidates:
+                if len(all_programmes.get(name, [])) > 0:
+                    programme_list = all_programmes[name]
+                    break
+        if len(programme_list) == 0:
+            continue
+
+        if target_name not in remapped_channel_ids:
+            remapped_channel_ids.append(target_name)
+
+        # Keep the richer programme source when multiple channels map to same target.
+        if len(remapped_programmes[target_name]) < len(programme_list):
+            remapped_programmes[target_name] = programme_list
+
+        remapped_channel_names[target_name] = [[target_name, 'zh']]
+
+    # Keep final order as in demo.txt
+    ordered_ids = [name for name in demo_channels if name in remapped_channel_ids]
+    return ordered_ids, remapped_channel_names, remapped_programmes
+
+
 async def main():
     urls = get_urls()
-    demo_channels = load_demo_channels('demo.txt')
-    alias_map, normalized_alias_map = load_alias_map('alias.txt')
     tasks = [fetch_epg(url) for url in urls]
     print("Fetching EPG data...")
     epg_contents = await tqdm_asyncio.gather(*tasks, desc="Fetching URLs")
-    candidate_channels = {}
+    all_channels_map = {}
+    all_channel_id = set()
+    all_channel_names = defaultdict(list)
+    all_programmes = defaultdict(list)
     print("Finished.")
     i = 0
     for epg_content in epg_contents:
@@ -318,32 +346,36 @@ async def main():
             for channel_id, display_names in channels.items():
                 if len(programmes[channel_id]) == 0:
                     continue
-                if channel_id not in candidate_channels:
-                    candidate_channels[channel_id] = {
-                        'names': [x[0] for x in display_names if x and x[0]],
-                        'programmes': programmes[channel_id]
-                    }
-                else:
-                    existing_names = set(candidate_channels[channel_id]['names'])
+                is_in_map = channel_id in all_channels_map
+                map_id = channel_id
+                for display_name_node in display_names:
+                    display_name = display_name_node[0]
+                    if is_in_map:
+                        break
+                    is_in_map = is_in_map or (display_name  in all_channels_map)
+                    map_id = display_name
+                map_id = all_channels_map.get(map_id, channel_id)
+                if not is_in_map:
+                    all_channel_id.add(channel_id)
+                    all_channel_names[channel_id] = display_names
+                    all_programmes[display_name] = programmes[channel_id]
+                    all_channels_map[channel_id] = channel_id
                     for display_name_node in display_names:
                         display_name = display_name_node[0]
-                        if display_name and display_name not in existing_names:
-                            candidate_channels[channel_id]['names'].append(display_name)
-                            existing_names.add(display_name)
-                    if len(candidate_channels[channel_id]['programmes']) < len(programmes[channel_id]):
-                        candidate_channels[channel_id]['programmes'] = programmes[channel_id]
+                        all_channels_map[display_name] = channel_id
+                elif len(all_programmes[map_id]) < len(programmes[channel_id]):
+                    all_programmes[map_id] = programmes[channel_id]
+                    for display_name_node in display_names:
+                        display_name = display_name_node[0]
+                        if display_name not in all_channels_map:
+                            all_channel_names[map_id].append(display_name_node)
+                            all_channels_map[display_name] = map_id
                 pbar.update(1)  # 更新进度条
-
-    channel_ids, channel_names, selected_programmes = select_channels_for_demo(
-        demo_channels,
-        alias_map,
-        normalized_alias_map,
-        candidate_channels
-    )
-
     print("Writing to XML...")
-    write_to_xml(channel_ids, channel_names,
-                selected_programmes, 'output/epg.xml')
+    remapped_channel_ids, remapped_channel_names, remapped_programmes = remap_to_demo_channels(
+        all_channel_id, all_channel_names, all_programmes)
+    write_to_xml(remapped_channel_ids, remapped_channel_names,
+                remapped_programmes, 'output/epg.xml')
     compress_to_gz('output/epg.xml', 'output/epg.gz')
 
 if __name__ == '__main__':
