@@ -8,6 +8,7 @@ import gzip
 import shutil
 from xml.dom import minidom
 import re
+from copy import deepcopy
 from opencc import OpenCC
 import os
 from tqdm import tqdm  # 引入 tqdm 的同步支持
@@ -317,6 +318,11 @@ def remap_to_demo_channels(all_channel_id, all_channel_names, all_programmes):
             remapped_programmes[target_name] = programme_list
 
         remapped_channel_names[target_name] = [[target_name, 'zh']]
+
+    # Fallback: if CCTV16-4K has no programme, reuse CCTV-16 programme.
+    if 'CCTV16-4K' in demo_channels and len(remapped_programmes['CCTV16-4K']) == 0:
+        if len(remapped_programmes['CCTV-16']) > 0:
+            remapped_programmes['CCTV16-4K'] = [deepcopy(prog) for prog in remapped_programmes['CCTV-16']]
 
     # Keep both CCTV-16 and CCTV16-4K in final output when configured in demo.txt.
     for fixed_name in ('CCTV-16', 'CCTV16-4K'):
