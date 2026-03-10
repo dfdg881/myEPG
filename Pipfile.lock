@@ -1245,11 +1245,11 @@
         },
         "pyinstaller-hooks-contrib": {
             "hashes": [
-                "sha256:cbd1eb00b5d13301b1cce602e1fffb17f0c531c0391f0a87a383d376be68a186",
-                "sha256:fc29f0481b58adf78ce9c1d9cf135fe96f38c708f74b2aa0670ef93e59578ab9"
+                "sha256:5ecd1068ad262afecadf07556279d2be52ca93a88b049fae17f1a2eb2969254a",
+                "sha256:800d3a198a49a6cd0de2d7fb795005fdca7a0222ed9cb47c0691abd1c27b9310"
             ],
             "markers": "python_version >= '3.8'",
-            "version": "==2026.2"
+            "version": "==2026.3"
         },
         "pysocks": {
             "hashes": [
