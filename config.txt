@@ -1,4 +1,5 @@
 #epg链接，一行一个
 https://raw.githubusercontent.com/mytv-android/SCTV_EPG/refs/heads/main/epg.xml
+https://raw.githubusercontent.com/litiande03/epg/refs/heads/master/pl.xml.gz
 https://epg.baoer.org.cn/e.xml
 http://epg.51zmt.top:8000/e.xml
