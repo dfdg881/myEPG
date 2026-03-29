@@ -2,7 +2,7 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 import aiohttp
 import asyncio
-from tqdm.asyncio import tqdm_asyncio  # 引入 tqdm 的异步支持
+from tqdm.asyncio import tqdm_asyncio
 from datetime import datetime, timezone, timedelta
 import gzip
 import shutil
@@ -11,12 +11,69 @@ import re
 from copy import deepcopy
 from opencc import OpenCC
 import os
-from tqdm import tqdm  # 引入 tqdm 的同步支持
+from tqdm import tqdm
 
 TZ_UTC_PLUS_8 = timezone(timedelta(hours=8))
 
+# ============ EPG 源预处理规则 ============
+# 在合并前对指定源的指定频道做预处理
+# 每条规则: (源URL关键字, 频道名关键字, 预处理函数)
+
+def _adjust_timezone(programme, from_offset, to_offset):
+    """将 programme 节点的 start/stop 时区从 from_offset 替换为 to_offset"""
+    for attr in ('start', 'stop'):
+        val = programme.get(attr, '')
+        if from_offset in val:
+            programme.set(attr, val.replace(from_offset, to_offset))
+
+
+def _make_tz_rule(channel_keyword, from_offset, to_offset):
+    """生成一个时区调整规则函数"""
+    def rule(channel_name, programme):
+        if channel_keyword in channel_name:
+            _adjust_timezone(programme, from_offset, to_offset)
+    return rule
+
+
+# 预处理规则列表: (源URL包含的关键字, 规则函数)
+PREPROCESS_RULES = [
+    # 天映经典频道: 时区 +0800 → +0700
+    ("kuke31/xmlgz", _make_tz_rule("天映经典", "+0800", "+0700")),
+]
+
+
+def preprocess_epg(url, epg_content):
+    """对 epg_content XML 字符串按规则做预处理，返回处理后的字符串"""
+    matched_rules = [rule for keyword, rule in PREPROCESS_RULES if keyword in url]
+    if not matched_rules:
+        return epg_content
+
+    try:
+        parser = ET.XMLParser(encoding='UTF-8')
+        root = ET.fromstring(epg_content, parser=parser)
+    except ET.ParseError:
+        return epg_content
+
+    # 建立 channel_id -> display_name 的映射
+    channel_names = {}
+    for channel in root.findall('channel'):
+        cid = channel.get('id', '')
+        names = [n.text for n in channel.findall('display-name') if n.text]
+        channel_names[cid] = ' '.join(names) + ' ' + cid
+
+    for programme in root.findall('programme'):
+        cid = programme.get('channel', '')
+        name_str = channel_names.get(cid, cid)
+        for rule in matched_rules:
+            rule(name_str, programme)
+
+    return ET.tostring(root, encoding='unicode')
+# ============ 预处理规则结束 ============
+
 
 def transform2_zh_hans(string):
+    if string is None:
+        return ""
     cc = OpenCC("t2s")
     new_str = cc.convert(string)
     return new_str
@@ -38,15 +95,17 @@ async def fetch_epg(url):
     except aiohttp.ClientError as e:
         print(f"{url}HTTP请求错误: {e}")
     except asyncio.TimeoutError:
-        print("{url}请求超时")
+        print(f"{url}请求超时")
     except Exception as e:
         print(f"{url}其他错误: {e}")
     return None
+
 
 def process_display_name(display_name):
     if display_name.endswith('高清'):
         display_name = display_name[:-2]
     return display_name
+
 
 def parse_epg(epg_content):
     try:
@@ -64,10 +123,11 @@ def parse_epg(epg_content):
         channel_id = transform2_zh_hans(channel.get('id'))
         channel_display_names = []
         for name in channel.findall('display-name'):
-            t_name = transform2_zh_hans(name.text)
+            raw_text = name.text if name.text else ""
+            t_name = transform2_zh_hans(raw_text)
             t_name = process_display_name(t_name)
             channel_display_names.append([t_name, name.get('lang', 'zh')])
-        if not channel_id.isdigit() and channel_id not in channel_display_names:
+        if not channel_id.isdigit() and [channel_id, 'zh'] not in channel_display_names:
             channel_display_names.append([channel_id, 'zh'])
         channels[channel_id] = channel_display_names
 
@@ -76,18 +136,29 @@ def parse_epg(epg_content):
 
     for programme in root.findall('programme'):
         channel_id = transform2_zh_hans(programme.get('channel'))
-        channel_start = datetime.strptime(
-            re.sub(r'\s+', '', programme.get('start')), "%Y%m%d%H%M%S%z")
-        channel_stop = datetime.strptime(
-            re.sub(r'\s+', '', programme.get('stop')), "%Y%m%d%H%M%S%z")
+        try:
+            channel_start = datetime.strptime(
+                re.sub(r'\s+', '', programme.get('start')), "%Y%m%d%H%M%S%z")
+            channel_stop = datetime.strptime(
+                re.sub(r'\s+', '', programme.get('stop')), "%Y%m%d%H%M%S%z")
+        except Exception:
+            continue
+
         channel_start = channel_start.astimezone(TZ_UTC_PLUS_8)
         channel_stop = channel_stop.astimezone(TZ_UTC_PLUS_8)
 
         if channel_stop.date() == today:
             valid_channels.add(channel_id)
 
-        channel_elem = ET.SubElement(
-            root, 'programme', attrib={"channel": channel_id, "start": channel_start.strftime("%Y%m%d%H%M%S %z"), "stop": channel_stop.strftime("%Y%m%d%H%M%S %z")})
+        channel_elem = ET.Element(
+            'programme',
+            attrib={
+                "channel": channel_id,
+                "start": channel_start.strftime("%Y%m%d%H%M%S %z"),
+                "stop": channel_stop.strftime("%Y%m%d%H%M%S %z")
+            }
+        )
+
         for title in programme.findall('title'):
             if title.text is None:
                 channel_title = "精彩节目"
@@ -96,11 +167,11 @@ def parse_epg(epg_content):
             langattr = title.get('lang')
             if langattr == 'zh' or langattr is None:
                 channel_title = transform2_zh_hans(channel_title)
-            channel_elem_t = ET.SubElement(
-                channel_elem, 'title')
+            channel_elem_t = ET.SubElement(channel_elem, 'title')
             channel_elem_t.text = channel_title
             if langattr is not None:
                 channel_elem_t.set('lang', langattr)
+
         for desc in programme.findall('desc'):
             if desc.text is None:
                 continue
@@ -108,43 +179,38 @@ def parse_epg(epg_content):
             channel_desc = desc.text.strip()
             if langattr == 'zh' or langattr is None:
                 channel_desc = transform2_zh_hans(channel_desc)
-            channel_elem_d = ET.SubElement(
-                channel_elem, 'desc')
+            channel_elem_d = ET.SubElement(channel_elem, 'desc')
             channel_elem_d.text = channel_desc.strip()
             if langattr is not None:
                 channel_elem_d.set('lang', langattr)
+
         programmes[channel_id].append(channel_elem)
 
-    # Filter channels that don't have any program ending today
     channels = {k: v for k, v in channels.items() if k in valid_channels}
-    # Optional: Filter programmes as well to keep data consistent, 
-    # though only valid channels are returned so main loop might be fine.
-    # But filtering programmes dict saves memory and ensures correctness if main iterates programmes keys logic changes.
     programmes = {k: v for k, v in programmes.items() if k in valid_channels}
 
     return channels, programmes
 
 
 def write_to_xml(channels_id, channels_names, programmes, filename):
-    # 目录不存在
     if not os.path.exists('output'):
         os.makedirs('output')
     current_time = datetime.now(TZ_UTC_PLUS_8).strftime("%Y%m%d%H%M%S %z")
     root = ET.Element('tv', attrib={'date': current_time})
+
     for channel_id in channels_id:
-        channel_elem = ET.SubElement(
-            root, 'channel', attrib={"id": channel_id})
+        channel_elem = ET.SubElement(root, 'channel', attrib={"id": channel_id})
         for display_name_node in channels_names[channel_id]:
             display_name = display_name_node[0]
             langattr = display_name_node[1]
             display_name_elem = ET.SubElement(
-                channel_elem, 'display-name', attrib={"lang": langattr})
+                channel_elem, 'display-name', attrib={"lang": langattr}
+            )
             display_name_elem.text = display_name
         for prog in programmes[channel_id]:
-            prog.set('channel', channel_id)  # 设置 programme 的 channel 属性
+            prog.set('channel', channel_id)
             root.append(prog)
 
-    # Beautify the XML output
     rough_string = ET.tostring(root, 'utf-8')
     reparsed = minidom.parseString(rough_string)
     with open(filename, 'w', encoding='utf-8') as f:
@@ -177,6 +243,8 @@ def normalize_channel_name(name):
 
 def get_demo_channels():
     channels = []
+    if not os.path.exists('demo.txt'):
+        return channels
     with open('demo.txt', 'r', encoding='utf-8') as file:
         for line in file:
             line = line.strip()
@@ -253,8 +321,7 @@ def build_target_aliases(demo_channels, alias_map):
 
 
 def match_channel_to_demo(candidates, demo_channels, demo_norm_to_name, target_aliases):
-    # Special handling for duplicated CCTV16 aliases:
-    # keep CCTV16-4K and CCTV-16 as two distinct channels.
+    # 特殊处理 CCTV16
     has_4k = any(is_cctv16_4k(name) for name in candidates)
     has_non_4k = any(is_cctv16_non_4k(name) for name in candidates)
     if has_4k and 'CCTV16-4K' in demo_channels:
@@ -268,18 +335,15 @@ def match_channel_to_demo(candidates, demo_channels, demo_norm_to_name, target_a
         if n_name:
             candidate_norms.append(n_name)
 
-    # exact match with demo names first
     for n_name in candidate_norms:
         if n_name in demo_norm_to_name:
             return demo_norm_to_name[n_name]
 
-    # exact match with alias map
     for target_name in demo_channels:
         aliases = target_aliases[target_name]
         if any(n_name in aliases for n_name in candidate_norms):
             return target_name
 
-    # fuzzy contains match
     best_target = None
     best_score = -1
     for target_name in demo_channels:
@@ -302,6 +366,9 @@ def match_channel_to_demo(candidates, demo_channels, demo_norm_to_name, target_a
 
 def remap_to_demo_channels(all_channel_id, all_channel_names, all_programmes):
     demo_channels = get_demo_channels()
+    if not demo_channels:
+        return list(all_channel_id), all_channel_names, all_programmes
+
     alias_map = get_alias_map()
     demo_norm_to_name, target_aliases = build_target_aliases(demo_channels, alias_map)
 
@@ -317,7 +384,8 @@ def remap_to_demo_channels(all_channel_id, all_channel_names, all_programmes):
                 candidates.append(node[0])
 
         target_name = match_channel_to_demo(
-            candidates, demo_channels, demo_norm_to_name, target_aliases)
+            candidates, demo_channels, demo_norm_to_name, target_aliases
+        )
         if target_name is None:
             continue
 
@@ -333,23 +401,20 @@ def remap_to_demo_channels(all_channel_id, all_channel_names, all_programmes):
         if target_name not in remapped_channel_ids:
             remapped_channel_ids.append(target_name)
 
-        # Keep the richer programme source when multiple channels map to same target.
         if len(remapped_programmes[target_name]) < len(programme_list):
             remapped_programmes[target_name] = programme_list
 
         remapped_channel_names[target_name] = [[target_name, 'zh']]
 
-    # Keep CCTV16-4K schedule identical to CCTV-16 when CCTV-16 exists.
+    # CCTV16-4K 复制 CCTV-16 节目单
     if 'CCTV16-4K' in demo_channels and len(remapped_programmes['CCTV-16']) > 0:
         remapped_programmes['CCTV16-4K'] = [deepcopy(prog) for prog in remapped_programmes['CCTV-16']]
 
-    # Keep both CCTV-16 and CCTV16-4K in final output when configured in demo.txt.
     for fixed_name in ('CCTV-16', 'CCTV16-4K'):
         if fixed_name in demo_channels and fixed_name not in remapped_channel_ids:
             remapped_channel_ids.append(fixed_name)
             remapped_channel_names[fixed_name] = [[fixed_name, 'zh']]
 
-    # Keep final order as in demo.txt
     ordered_ids = [name for name in demo_channels if name in remapped_channel_ids]
     return ordered_ids, remapped_channel_names, remapped_programmes
 
@@ -359,10 +424,12 @@ async def main():
     tasks = [fetch_epg(url) for url in urls]
     print("Fetching EPG data...")
     epg_contents = await tqdm_asyncio.gather(*tasks, desc="Fetching URLs")
+
     all_channels_map = {}
     all_channel_id = set()
     all_channel_names = defaultdict(list)
     all_programmes = defaultdict(list)
+
     print("Finished.")
     i = 0
     for epg_content in epg_contents:
@@ -370,19 +437,25 @@ async def main():
         print(f"Processing EPG source...{i}/{len(epg_contents)}")
         if epg_content is None:
             continue
+
         print("Parsing EPG data...")
+        epg_content = preprocess_epg(urls[i - 1], epg_content)
         channels, programmes = parse_epg(epg_content)
         print("Finished.")
+
         with tqdm(total=len(channels), desc="Merging EPG", unit="file") as pbar:
             for channel_id, display_names in channels.items():
                 if len(programmes[channel_id]) == 0:
+                    pbar.update(1)
                     continue
+
                 candidates = [channel_id] + [node[0] for node in display_names if node and node[0]]
                 bucket = cctv16_bucket(candidates)
                 special_key = None if bucket is None else f"__{bucket}__"
 
                 is_in_map = channel_id in all_channels_map
                 map_id = channel_id
+
                 if special_key is not None and special_key in all_channels_map:
                     is_in_map = True
                     map_id = all_channels_map[special_key]
@@ -391,9 +464,11 @@ async def main():
                     display_name = display_name_node[0]
                     if is_in_map:
                         break
-                    is_in_map = is_in_map or (display_name  in all_channels_map)
+                    is_in_map = is_in_map or (display_name in all_channels_map)
                     map_id = display_name
+
                 map_id = all_channels_map.get(map_id, channel_id)
+
                 if not is_in_map:
                     all_channel_id.add(channel_id)
                     all_channel_names[channel_id] = display_names
@@ -405,20 +480,24 @@ async def main():
                         display_name = display_name_node[0]
                         if should_map_display_name(display_name, bucket):
                             all_channels_map[display_name] = channel_id
-                elif len(all_programmes[map_id]) < len(programmes[channel_id]):
-                    all_programmes[map_id] = programmes[channel_id]
+                else:
+                    if len(all_programmes[map_id]) < len(programmes[channel_id]):
+                        all_programmes[map_id] = programmes[channel_id]
                     for display_name_node in display_names:
                         display_name = display_name_node[0]
                         if display_name not in all_channels_map and should_map_display_name(display_name, bucket):
                             all_channel_names[map_id].append(display_name_node)
                             all_channels_map[display_name] = map_id
-                pbar.update(1)  # 更新进度条
+
+                pbar.update(1)
+
     print("Writing to XML...")
     remapped_channel_ids, remapped_channel_names, remapped_programmes = remap_to_demo_channels(
-        all_channel_id, all_channel_names, all_programmes)
-    write_to_xml(remapped_channel_ids, remapped_channel_names,
-                remapped_programmes, 'output/epg.xml')
+        all_channel_id, all_channel_names, all_programmes
+    )
+    write_to_xml(remapped_channel_ids, remapped_channel_names, remapped_programmes, 'output/epg.xml')
     compress_to_gz('output/epg.xml', 'output/epg.gz')
+
 
 if __name__ == '__main__':
     asyncio.run(main())
